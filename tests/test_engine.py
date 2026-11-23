@@ -84,3 +84,22 @@ def test_audit_rejection_requests_next_cycle():
     assert calls == ["planner", "executor", "auditor"]
     assert outcome.state is OrchestratorState.EVALUATING
     assert outcome.next_cycle is True
+
+
+
+def test_run_honors_max_cycles():
+    from multi_ia.policies import ExecutionPolicy
+
+    calls = []
+    orchestrator = Orchestrator(
+        RecordingAdapter("planner", calls, completed({"plan": "p"})),
+        RecordingAdapter("executor", calls, completed({"result": "r"})),
+        RecordingAdapter("auditor", calls, completed({"approved": False})),
+        policy=ExecutionPolicy(max_cycles=2, max_seconds=30, max_retries=0),
+    )
+
+    outcome = asyncio.run(orchestrator.run("run-1"))
+
+    assert calls == ["planner", "executor", "auditor"] * 2
+    assert outcome.state is OrchestratorState.PAUSED
+    assert outcome.reason == "max_cycles"
