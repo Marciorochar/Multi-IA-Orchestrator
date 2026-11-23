@@ -41,6 +41,14 @@ class RunStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS controls (
+                run_id TEXT PRIMARY KEY,
+                stop_requested INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
         self._conn.commit()
 
     def append_event(self, run_id: str, event: dict) -> None:
@@ -78,6 +86,35 @@ class RunStore:
             (run_id,),
         ).fetchone()
         return None if row is None else json.loads(row[0])
+
+    def request_stop(self, run_id: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO controls(run_id, stop_requested)
+                VALUES (?, 1)
+                ON CONFLICT(run_id) DO UPDATE SET stop_requested = 1
+                """,
+                (run_id,),
+            )
+
+    def clear_stop_request(self, run_id: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO controls(run_id, stop_requested)
+                VALUES (?, 0)
+                ON CONFLICT(run_id) DO UPDATE SET stop_requested = 0
+                """,
+                (run_id,),
+            )
+
+    def stop_requested(self, run_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT stop_requested FROM controls WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        return bool(row and row[0])
 
     @staticmethod
     def can_replay_write(checkpoint: dict | None) -> bool:

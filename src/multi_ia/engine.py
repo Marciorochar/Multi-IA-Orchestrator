@@ -46,6 +46,7 @@ class Orchestrator:
         policy: ExecutionPolicy | None = None,
         cancellation: CancellationController | None = None,
         store: RunStore | None = None,
+        initial_payload: dict[str, Any] | None = None,
     ) -> None:
         self.planner = planner
         self.executor = executor
@@ -53,7 +54,70 @@ class Orchestrator:
         self.policy = policy or ExecutionPolicy(max_cycles=1, max_seconds=300, max_retries=0)
         self.cancellation = cancellation or CancellationController()
         self.store = store
+        self.initial_payload = dict(initial_payload or {})
         self.state = OrchestratorState.IDLE
+
+    async def run(
+        self,
+        run_id: str,
+        *,
+        progress_guard: ProgressGuard | None = None,
+    ) -> CycleOutcome:
+        guard = progress_guard or ProgressGuard()
+        previous: dict = {}
+        last_outcome: CycleOutcome | None = None
+
+        for cycle_id in range(1, self.policy.max_cycles + 1):
+            outcome = await self.run_cycle(run_id, cycle_id)
+            last_outcome = outcome
+            if outcome.state in {
+                OrchestratorState.COMPLETED,
+                OrchestratorState.CANCELLED,
+                OrchestratorState.FAILED,
+            }:
+                return outcome
+
+            current = {
+                "status": outcome.state.value,
+                "evidence": [
+                    item for result in outcome.results.values() for item in result.evidence
+                ],
+                "artifacts": [
+                    artifact
+                    for result in outcome.results.values()
+                    for artifact in result.payload.get("artifacts", [])
+                ],
+                "tests": [
+                    test
+                    for result in outcome.results.values()
+                    for test in result.payload.get("tests", [])
+                ],
+            }
+            if guard.evaluate(previous, current) == "pause":
+                self.state = OrchestratorState.PAUSED
+                return self._finish(
+                    run_id,
+                    cycle_id,
+                    CycleOutcome(
+                        state=self.state,
+                        results=outcome.results,
+                        reason="no_progress",
+                    ),
+                )
+            if not outcome.next_cycle:
+                return outcome
+            previous = current
+
+        self.state = OrchestratorState.PAUSED
+        return self._finish(
+            run_id,
+            self.policy.max_cycles,
+            CycleOutcome(
+                state=self.state,
+                results={} if last_outcome is None else last_outcome.results,
+                reason="max_cycles",
+            ),
+        )
 
     async def run_cycle(self, run_id: str, cycle_id: int) -> CycleOutcome:
         results: dict[str, AgentResult] = {}
@@ -62,7 +126,12 @@ class Orchestrator:
             planner_result = await self._run_stage(
                 adapter=self.planner,
                 state=OrchestratorState.PLANNING,
-                request=AgentRequest(\n                    run_id=run_id,\n                    cycle_id=cycle_id,\n                    role="planner",\n                    payload=self.initial_payload,\n                ),
+                request=AgentRequest(
+                    run_id=run_id,
+                    cycle_id=cycle_id,
+                    role="planner",
+                    payload=self.initial_payload,
+                ),
             )
             failure = self._validate_stage_result(planner_result, results, "planner")
             if failure is not None:
@@ -128,7 +197,7 @@ class Orchestrator:
         state: OrchestratorState,
         request: AgentRequest,
     ) -> Any:
-        if self.cancellation.stop_requested:
+        if self._stop_requested(request.run_id):
             raise _StopRequested
         self.state = state
         if self.store is not None:
@@ -140,7 +209,7 @@ class Orchestrator:
             adapter.run(request),
             timeout=self.policy.max_seconds,
         )
-        if self.cancellation.stop_requested:
+        if self._stop_requested(request.run_id):
             raise _StopRequested
         return result
 

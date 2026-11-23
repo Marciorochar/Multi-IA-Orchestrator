@@ -20,6 +20,9 @@ class ExecutionPolicy:
         if self.max_budget is not None and self.max_budget < 0:
             raise ValueError("max_budget cannot be negative")
 
+    def allows_cycle(self, cycle_id: int) -> bool:
+        return 1 <= cycle_id <= self.max_cycles
+
 
 class CancellationController:
     def __init__(self) -> None:
@@ -45,7 +48,6 @@ class ApprovalGate:
 
     def check(self, action: str) -> bool:
         return action not in self.dangerous_actions or action in self._approved
-
 
 
 class ProgressGuard:
