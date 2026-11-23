@@ -1,6 +1,6 @@
 # Multi-IA Orchestrator
 
-> **Status:** proposta aprovada; implementação ainda não iniciada.
+> **Status:** núcleo MVP em implementação na branch `feat/mvp-core`; integrações reais ainda bloqueadas pela Task 0.
 
 ## Visão geral
 
@@ -104,4 +104,17 @@ Consulte [docs/integrations/compatibility.md](docs/integrations/compatibility.md
 
 Não pressupor acesso às mesmas conversas pela API do ChatGPT; não presumir CLI/API do Antigravity sem validação; não automatizar interfaces contrariando restrições dos fornecedores; não executar alterações na máquina do usuário a partir do GitHub sem sua instalação e autorização.
 
-**Estado atual:** documentação de projeto publicada para revisão. Nenhuma integração real foi testada.
+## CLI do MVP (modo fake)
+
+Enquanto a Task 0 não validar as integrações reais, a CLI executa somente adaptadores simulados:
+
+```powershell
+python -m multi_ia.cli start --run-id demo-1 --goal "validar o fluxo" --repo .
+python -m multi_ia.cli status --run-id demo-1
+python -m multi_ia.cli stop --run-id demo-1
+python -m multi_ia.cli resume --run-id demo-1 --goal "validar o fluxo" --repo .
+```
+
+O comando `resume` recusa automaticamente checkpoints marcados como `needs_reconciliation`.
+
+**Estado atual:** Tasks 1–5 e CLI fake da Task 7 implementadas na branch de desenvolvimento. Nenhuma integração real com ChatGPT, Antigravity ou Codex foi alegada ou testada.

@@ -62,7 +62,7 @@ class Orchestrator:
             planner_result = await self._run_stage(
                 adapter=self.planner,
                 state=OrchestratorState.PLANNING,
-                request=AgentRequest(run_id=run_id, cycle_id=cycle_id, role="planner", payload={}),
+                request=AgentRequest(\n                    run_id=run_id,\n                    cycle_id=cycle_id,\n                    role="planner",\n                    payload=self.initial_payload,\n                ),
             )
             failure = self._validate_stage_result(planner_result, results, "planner")
             if failure is not None:
@@ -143,6 +143,11 @@ class Orchestrator:
         if self.cancellation.stop_requested:
             raise _StopRequested
         return result
+
+    def _stop_requested(self, run_id: str) -> bool:
+        return self.cancellation.stop_requested or (
+            self.store is not None and self.store.stop_requested(run_id)
+        )
 
     def _validate_stage_result(
         self,
