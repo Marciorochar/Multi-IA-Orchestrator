@@ -50,3 +50,34 @@ def test_secrets_are_redacted(tmp_path):
     assert event["token"] == "<redacted>"
     assert event["nested"]["password"] == "<redacted>"
     assert event["nested"]["message"] == "safe"
+
+
+
+def test_engine_persists_terminal_checkpoint(tmp_path):
+    import asyncio
+
+    from multi_ia.contracts import AgentResult
+    from multi_ia.engine import Orchestrator
+
+    class StaticAdapter:
+        def __init__(self, result):
+            self.result = result
+
+        async def run(self, request):
+            return self.result
+
+    store = RunStore(tmp_path / "runs.sqlite")
+    ok = AgentResult(status="completed", payload={}, evidence=["ok"])
+    audit = AgentResult(status="completed", payload={"approved": True}, evidence=["ok"])
+    orchestrator = Orchestrator(
+        StaticAdapter(ok),
+        StaticAdapter(ok),
+        StaticAdapter(audit),
+        store=store,
+    )
+
+    asyncio.run(orchestrator.run_cycle("run-1", 1))
+
+    checkpoint = store.load_checkpoint("run-1")
+    assert checkpoint["cycle_id"] == 1
+    assert checkpoint["state"] == "completed"
