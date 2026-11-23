@@ -1,0 +1,13 @@
+[project]
+name = "multi-ia-orchestrator"
+version = "0.1.0"
+description = "Controlled multi-agent orchestration core"
+requires-python = ">=3.12"
+
+[project.scripts]
+multi-ia = "multi_ia.cli:entrypoint"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
