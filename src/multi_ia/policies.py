@@ -45,3 +45,35 @@ class ApprovalGate:
 
     def check(self, action: str) -> bool:
         return action not in self.dangerous_actions or action in self._approved
+
+
+
+class ProgressGuard:
+    def __init__(self, max_stagnant_cycles: int = 2) -> None:
+        if max_stagnant_cycles < 1:
+            raise ValueError("max_stagnant_cycles must be at least 1")
+        self.max_stagnant_cycles = max_stagnant_cycles
+        self._stagnant_cycles = 0
+
+    @staticmethod
+    def _signal(snapshot: dict) -> tuple:
+        return (
+            snapshot.get("status"),
+            tuple(snapshot.get("evidence", ())),
+            tuple(snapshot.get("artifacts", ())),
+            tuple(snapshot.get("tests", ())),
+            tuple(sorted(snapshot.get("metrics", {}).items())),
+        )
+
+    def evaluate(self, previous: dict, current: dict) -> str:
+        if current.get("verified_success") is True:
+            self._stagnant_cycles = 0
+            return "complete"
+
+        if self._signal(previous) == self._signal(current):
+            self._stagnant_cycles += 1
+            if self._stagnant_cycles >= self.max_stagnant_cycles:
+                return "pause"
+        else:
+            self._stagnant_cycles = 0
+        return "continue"

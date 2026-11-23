@@ -7,7 +7,7 @@ from typing import Any
 
 from multi_ia.adapters.base import AgentAdapter
 from multi_ia.contracts import AgentRequest, AgentResult
-from multi_ia.policies import CancellationController, ExecutionPolicy
+from multi_ia.policies import CancellationController, ExecutionPolicy, ProgressGuard
 from multi_ia.store import RunStore
 
 
