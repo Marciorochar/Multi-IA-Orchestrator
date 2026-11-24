@@ -196,7 +196,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFormat("0%")
         self.progress_bar.setMinimumWidth(220)
         self.state_label = QLabel("Estado: IDLE")
-        self.state_label.setObjectName("stateLabel")
+        self.state_label.setObjectName("stateBadge")
         run_layout.addWidget(self.cycle_label)
         run_layout.addWidget(self.progress_bar, 1)
         run_layout.addWidget(self.timer_label)
@@ -204,8 +204,8 @@ class MainWindow(QMainWindow):
         run_layout.addWidget(self.state_label)
         layout.addWidget(run_panel)
 
-        logs_panel = self._panel()
-        logs_layout = QVBoxLayout(logs_panel)
+        self.logs_panel = self._panel()
+        logs_layout = QVBoxLayout(self.logs_panel)
         logs_layout.setContentsMargins(18, 14, 18, 14)
         logs_header = QHBoxLayout()
         logs_title = QLabel("LOGS DA EXECUÇÃO")
@@ -218,10 +218,11 @@ class MainWindow(QMainWindow):
         logs_header.addWidget(self.clear_log_button)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
+        self.log_view.setMinimumHeight(180)
         self.log_view.setPlaceholderText("Os eventos da execução aparecerão aqui.")
         logs_layout.addLayout(logs_header)
         logs_layout.addWidget(self.log_view, 1)
-        layout.addWidget(logs_panel, 1)
+        layout.addWidget(self.logs_panel, 1)
 
     @staticmethod
     def _panel() -> QFrame:
@@ -304,9 +305,9 @@ class MainWindow(QMainWindow):
                 border-radius: 10px;
             }
             QFrame#agentCard {
-                background: #181b21;
-                border: 1px solid #353c47;
-                border-radius: 9px;
+                background: #191d23;
+                border: 1px solid #353d49;
+                border-radius: 10px;
             }
             QLabel#flowArrow {
                 color: #5d6878;
@@ -342,8 +343,9 @@ class MainWindow(QMainWindow):
                 background: #333a46;
             }
             QPushButton:disabled {
-                color: #6d7480;
+                color: #98a2b3;
                 background: #20242b;
+                border-color: #303640;
             }
             QPushButton#startButton {
                 background: #1f6f46;
@@ -361,19 +363,57 @@ class MainWindow(QMainWindow):
                 border-color: #a5444f;
             }
             QLabel#agentName {
-                font-size: 15px;
+                font-size: 16px;
                 font-weight: 700;
             }
             QLabel#agentStatus {
                 font-weight: 600;
             }
-            QLabel#stateLabel {
+            QLabel#stateBadge {
                 font-weight: 700;
-                color: #8bb8ff;
+                color: #c5ced9;
+                background: #252a32;
+                border: 1px solid #3a424e;
+                border-radius: 10px;
+                padding: 5px 10px;
+            }
+            QLabel#stateBadge[runState="IDLE"] {
+                color: #aeb7c3;
+                background: #252a32;
+                border-color: #3a424e;
+            }
+            QLabel#stateBadge[runState="INICIANDO"],
+            QLabel#stateBadge[runState="PLANNING"],
+            QLabel#stateBadge[runState="EXECUTING"],
+            QLabel#stateBadge[runState="AUDITING"],
+            QLabel#stateBadge[runState="RETOMANDO"] {
+                color: #b8d7ff;
+                background: #18324f;
+                border-color: #315f90;
+            }
+            QLabel#stateBadge[runState="PAUSED"],
+            QLabel#stateBadge[runState="PAUSA SOLICITADA"] {
+                color: #f2d38b;
+                background: #3a301b;
+                border-color: #6c5728;
+            }
+            QLabel#stateBadge[runState="COMPLETED"] {
+                color: #a8e5c1;
+                background: #173a29;
+                border-color: #2f7450;
+            }
+            QLabel#stateBadge[runState="FAILED"],
+            QLabel#stateBadge[runState="CANCELLED"],
+            QLabel#stateBadge[runState="CANCELAMENTO SOLICITADO"] {
+                color: #ffc0c5;
+                background: #4a2027;
+                border-color: #8a3945;
             }
             QLabel#sectionTitle {
-                font-size: 15px;
+                color: #c7ced8;
+                font-size: 12px;
                 font-weight: 700;
+                letter-spacing: 0.8px;
             }
             QProgressBar#cycleProgress {
                 background: #111318;

@@ -160,3 +160,7 @@ A janela oferece:
 O botão **Pausar** é cooperativo: a pausa acontece em limites seguros entre etapas. **Parar** solicita cancelamento e impede novas etapas.
 
 > A interface ainda não controla sessões reais de ChatGPT, Antigravity ou Codex. Isso será implementado somente após a Task 0 validar os mecanismos disponíveis.
+
+### Dashboard operacional refinado
+
+A interface foi refinada para uso operacional diário: configuração mais compacta, fluxo visual **ChatGPT → Antigravity → Codex**, barra de progresso por ciclos, badge de estado destacado e painel de logs ampliado com limpeza somente visual. Uma nova execução limpa a visualização anterior dos logs sem apagar eventos ou checkpoints persistidos.
