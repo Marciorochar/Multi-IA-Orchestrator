@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
+from collections.abc import Callable
 from typing import Any
 
 from multi_ia.adapters.base import AgentAdapter
 from multi_ia.contracts import AgentRequest, AgentResult
-from multi_ia.policies import CancellationController, ExecutionPolicy, ProgressGuard
+from multi_ia.policies import CancellationController, ExecutionPolicy, PauseController, ProgressGuard
 from multi_ia.store import RunStore
 
 
@@ -47,6 +48,8 @@ class Orchestrator:
         cancellation: CancellationController | None = None,
         store: RunStore | None = None,
         initial_payload: dict[str, Any] | None = None,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
+        pause: PauseController | None = None,
     ) -> None:
         self.planner = planner
         self.executor = executor
@@ -55,6 +58,8 @@ class Orchestrator:
         self.cancellation = cancellation or CancellationController()
         self.store = store
         self.initial_payload = dict(initial_payload or {})
+        self.event_sink = event_sink
+        self.pause = pause or PauseController()
         self.state = OrchestratorState.IDLE
 
     async def run(
@@ -65,9 +70,11 @@ class Orchestrator:
     ) -> CycleOutcome:
         guard = progress_guard or ProgressGuard()
         previous: dict = {}
+        self._emit("run_started", run_id=run_id)
         last_outcome: CycleOutcome | None = None
 
         for cycle_id in range(1, self.policy.max_cycles + 1):
+            self._emit("cycle_started", run_id=run_id, cycle_id=cycle_id)
             outcome = await self.run_cycle(run_id, cycle_id)
             last_outcome = outcome
             if outcome.state in {
@@ -75,6 +82,18 @@ class Orchestrator:
                 OrchestratorState.CANCELLED,
                 OrchestratorState.FAILED,
             }:
+                self._emit("state_changed", run_id=run_id, state=outcome.state.value)
+                terminal_type = {
+                    OrchestratorState.COMPLETED: "run_completed",
+                    OrchestratorState.CANCELLED: "run_cancelled",
+                    OrchestratorState.FAILED: "run_failed",
+                }[outcome.state]
+                self._emit(
+                    terminal_type,
+                    run_id=run_id,
+                    state=outcome.state.value,
+                    reason=outcome.reason,
+                )
                 return outcome
 
             current = {
@@ -95,7 +114,7 @@ class Orchestrator:
             }
             if guard.evaluate(previous, current) == "pause":
                 self.state = OrchestratorState.PAUSED
-                return self._finish(
+                paused = self._finish(
                     run_id,
                     cycle_id,
                     CycleOutcome(
@@ -104,12 +123,20 @@ class Orchestrator:
                         reason="no_progress",
                     ),
                 )
+                self._emit("state_changed", run_id=run_id, state=paused.state.value)
+                self._emit(
+                    "run_paused",
+                    run_id=run_id,
+                    state=paused.state.value,
+                    reason=paused.reason,
+                )
+                return paused
             if not outcome.next_cycle:
                 return outcome
             previous = current
 
         self.state = OrchestratorState.PAUSED
-        return self._finish(
+        paused = self._finish(
             run_id,
             self.policy.max_cycles,
             CycleOutcome(
@@ -118,6 +145,14 @@ class Orchestrator:
                 reason="max_cycles",
             ),
         )
+        self._emit("state_changed", run_id=run_id, state=paused.state.value)
+        self._emit(
+            "run_paused",
+            run_id=run_id,
+            state=paused.state.value,
+            reason=paused.reason,
+        )
+        return paused
 
     async def run_cycle(self, run_id: str, cycle_id: int) -> CycleOutcome:
         results: dict[str, AgentResult] = {}
@@ -197,9 +232,20 @@ class Orchestrator:
         state: OrchestratorState,
         request: AgentRequest,
     ) -> Any:
+        if not await self.pause.wait_until_resumed(
+            lambda: self._stop_requested(request.run_id)
+        ):
+            raise _StopRequested
         if self._stop_requested(request.run_id):
             raise _StopRequested
         self.state = state
+        self._emit(
+            "stage_started",
+            run_id=request.run_id,
+            cycle_id=request.cycle_id,
+            role=request.role,
+            state=state.value,
+        )
         if self.store is not None:
             self.store.append_event(
                 request.run_id,
@@ -209,9 +255,21 @@ class Orchestrator:
             adapter.run(request),
             timeout=self.policy.max_seconds,
         )
+        self._emit(
+            "stage_completed",
+            run_id=request.run_id,
+            cycle_id=request.cycle_id,
+            role=request.role,
+            status=getattr(result, "status", "invalid"),
+        )
         if self._stop_requested(request.run_id):
             raise _StopRequested
         return result
+
+    def _emit(self, event_type: str, **payload: Any) -> None:
+        if self.event_sink is None:
+            return
+        self.event_sink({"type": event_type, **payload})
 
     def _stop_requested(self, run_id: str) -> bool:
         return self.cancellation.stop_requested or (

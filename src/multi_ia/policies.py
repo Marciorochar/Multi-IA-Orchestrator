@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
@@ -79,3 +81,30 @@ class ProgressGuard:
         else:
             self._stagnant_cycles = 0
         return "continue"
+
+
+class PauseController:
+    def __init__(self) -> None:
+        self._paused = False
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def request_pause(self) -> None:
+        self._paused = True
+
+    def resume(self) -> None:
+        self._paused = False
+
+    async def wait_until_resumed(
+        self,
+        stop_requested: Callable[[], bool],
+        *,
+        poll_seconds: float = 0.01,
+    ) -> bool:
+        while self._paused:
+            if stop_requested():
+                return False
+            await asyncio.sleep(poll_seconds)
+        return not stop_requested()

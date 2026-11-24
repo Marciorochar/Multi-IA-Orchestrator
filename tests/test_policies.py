@@ -97,3 +97,37 @@ def test_dangerous_action_requires_approval():
     assert gate.check("publish") is False
     gate.approve("publish")
     assert gate.check("publish") is True
+
+
+def test_stop_while_paused_cancels_without_resume():
+    from multi_ia.policies import PauseController
+
+    calls = []
+    cancellation = CancellationController()
+    pause = PauseController()
+
+    class PausingPlanner(StaticAdapter):
+        async def run(self, request):
+            self.calls.append(self.name)
+            pause.request_pause()
+            return self.result
+
+    orchestrator = Orchestrator(
+        PausingPlanner(ok({"plan": "p"}), calls, "planner"),
+        StaticAdapter(ok(), calls, "executor"),
+        StaticAdapter(ok({"approved": True}), calls, "auditor"),
+        cancellation=cancellation,
+        pause=pause,
+    )
+
+    async def scenario():
+        task = asyncio.create_task(orchestrator.run_cycle("run-stop-pause", 1))
+        await asyncio.sleep(0.03)
+        cancellation.request_stop()
+        return await asyncio.wait_for(task, timeout=1)
+
+    outcome = asyncio.run(scenario())
+
+    assert calls == ["planner"]
+    assert outcome.state is OrchestratorState.CANCELLED
+    assert outcome.reason == "stop_requested"
