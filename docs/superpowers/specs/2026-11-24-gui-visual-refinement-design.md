@@ -249,8 +249,8 @@ Não transformar a interface em:
 Ao clicar em **Iniciar**:
 1. limpar visualização dos logs;
 2. resetar cards;
-3. mostrar ciclo 0/N;
-4. estado passa para preparação/execução;
+3. mostrar ciclo 0/N e progresso em 0%;
+4. mostrar badge **INICIANDO** como estado apenas visual até o primeiro evento real do núcleo;
 5. controles de entrada ficam bloqueados;
 6. Iniciar desabilita;
 7. Pausar e Parar habilitam.
@@ -341,3 +341,11 @@ A fase será considerada concluída quando:
 8. comportamento funcional atual permanecer intacto;
 9. testes GUI e núcleo continuarem verdes;
 10. nenhuma integração real for adicionada.
+
+
+## Decisões do builder
+
+- **INICIANDO** é um estado apenas de apresentação da GUI; não adiciona novo estado ao `OrchestratorState`.
+- A progress bar usa somente `cycle_id / max_cycles`; no ciclo 0/N mostra 0% e em `COMPLETED` mostra 100%.
+- O botão **Limpar** afeta somente `QPlainTextEdit`; nunca chama métodos de exclusão no `RunStore`.
+- A barra de título nativa do Windows permanece nesta fase.
