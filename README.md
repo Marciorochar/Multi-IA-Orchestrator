@@ -1,6 +1,6 @@
 # Multi-IA Orchestrator
 
-> **Status:** núcleo MVP em implementação na branch `feat/mvp-core`; integrações reais ainda bloqueadas pela Task 0.
+> **Status:** núcleo MVP disponível na `main`; interface desktop PySide6 em desenvolvimento na branch `feat/pyside6-gui`. Integrações reais continuam bloqueadas pela Task 0.
 
 ## Visão geral
 
@@ -118,3 +118,45 @@ python -m multi_ia.cli resume --run-id demo-1 --goal "validar o fluxo" --repo .
 O comando `resume` recusa automaticamente checkpoints marcados como `needs_reconciliation`.
 
 **Estado atual:** Tasks 1–5 e CLI fake da Task 7 implementadas na branch de desenvolvimento. Nenhuma integração real com ChatGPT, Antigravity ou Codex foi alegada ou testada.
+
+
+## Interface desktop PySide6
+
+A interface visual usa o mesmo núcleo do Orchestrator e, nesta fase, executa apenas os adaptadores simulados.
+
+### Instalação no Windows
+
+No PowerShell, dentro do repositório:
+
+```powershell
+python -m pip install -e ".[gui]"
+```
+
+O extra `gui` instala PySide6. A linha atual do PySide6 suporta Python 3.14.
+
+### Abrir a interface
+
+```powershell
+multi-ia-gui
+```
+
+Alternativamente:
+
+```powershell
+python -m multi_ia.gui.app
+```
+
+A janela oferece:
+
+- objetivo da execução;
+- seleção do repositório;
+- máximo de ciclos;
+- botões **Iniciar**, **Pausar/Retomar** e **Parar**;
+- estados de ChatGPT, Antigravity e Codex;
+- ciclo, cronômetro e estado geral;
+- logs em tempo real;
+- indicação explícita de **Modo simulado**.
+
+O botão **Pausar** é cooperativo: a pausa acontece em limites seguros entre etapas. **Parar** solicita cancelamento e impede novas etapas.
+
+> A interface ainda não controla sessões reais de ChatGPT, Antigravity ou Codex. Isso será implementado somente após a Task 0 validar os mecanismos disponíveis.
