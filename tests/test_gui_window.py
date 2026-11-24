@@ -315,3 +315,18 @@ def test_agent_cards_change_visual_state_with_agent_status(app, tmp_path):
     assert 'QFrame#agentCard[agentState="failed"]' in style
 
     window.close()
+
+
+def test_dashboard_fits_target_height_and_labels_are_transparent(app, tmp_path):
+    window = MainWindow(db_path=tmp_path / "runs.sqlite")
+    window.resize(900, 680)
+    window.show()
+    app.processEvents()
+
+    assert window.minimumSizeHint().height() <= 680
+    assert window.centralWidget().layout().minimumSize().height() <= 680
+    assert window.height() == 680
+    assert "QLabel {" in window.styleSheet()
+    assert "background: transparent;" in window.styleSheet()
+
+    window.close()
