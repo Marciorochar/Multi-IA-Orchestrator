@@ -293,3 +293,25 @@ def test_final_theme_prioritizes_state_and_logs(app, tmp_path):
     assert "Aguardando" in window.auditor_status.text()
 
     window.close()
+
+
+def test_agent_cards_change_visual_state_with_agent_status(app, tmp_path):
+    window = MainWindow(db_path=tmp_path / "runs.sqlite")
+
+    assert window.agent_cards["planner"].property("agentState") == "waiting"
+
+    window._set_agent_status("planner", "Planejando")
+    assert window.agent_cards["planner"].property("agentState") == "active"
+
+    window._set_agent_status("planner", "Concluído")
+    assert window.agent_cards["planner"].property("agentState") == "completed"
+
+    window._set_agent_status("planner", "Falhou")
+    assert window.agent_cards["planner"].property("agentState") == "failed"
+
+    style = window.styleSheet()
+    assert 'QFrame#agentCard[agentState="active"]' in style
+    assert 'QFrame#agentCard[agentState="completed"]' in style
+    assert 'QFrame#agentCard[agentState="failed"]' in style
+
+    window.close()
