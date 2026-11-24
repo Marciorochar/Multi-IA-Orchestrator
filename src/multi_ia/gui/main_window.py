@@ -49,7 +49,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("Multi-IA Orchestrator")
         self.setMinimumSize(900, 680)
-        self.resize(980, 760)
+        self.resize(980, 720)
 
         self._build_ui()
         self._apply_theme()
@@ -66,8 +66,8 @@ class MainWindow(QMainWindow):
         root = QWidget(self)
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(24, 20, 24, 24)
-        layout.setSpacing(14)
+        layout.setContentsMargins(18, 12, 18, 12)
+        layout.setSpacing(8)
 
         title_row = QHBoxLayout()
         title = QLabel("MULTI-IA ORCHESTRATOR")
@@ -87,8 +87,8 @@ class MainWindow(QMainWindow):
 
         input_panel = self._panel()
         input_layout = QVBoxLayout(input_panel)
-        input_layout.setContentsMargins(18, 14, 18, 14)
-        input_layout.setSpacing(8)
+        input_layout.setContentsMargins(14, 8, 14, 8)
+        input_layout.setSpacing(6)
 
         objective_label = QLabel("OBJETIVO")
         objective_label.setObjectName("fieldLabel")
@@ -98,14 +98,14 @@ class MainWindow(QMainWindow):
         self.goal_edit.setPlaceholderText(
             "Ex.: analisar o projeto, executar a tarefa e auditar o resultado"
         )
-        self.goal_edit.setFixedHeight(72)
+        self.goal_edit.setFixedHeight(52)
         input_layout.addWidget(self.goal_edit)
 
         repo_row = QHBoxLayout()
         repo_row.setSpacing(10)
 
         repo_block = QVBoxLayout()
-        repo_block.setSpacing(5)
+        repo_block.setSpacing(3)
         repo_label = QLabel("REPOSITÓRIO")
         repo_label.setObjectName("fieldLabel")
         self.repo_edit = QLineEdit()
@@ -121,7 +121,7 @@ class MainWindow(QMainWindow):
         repo_row.addWidget(self.browse_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
         cycles_block = QVBoxLayout()
-        cycles_block.setSpacing(5)
+        cycles_block.setSpacing(3)
         self.max_cycles_label = QLabel("CICLOS")
         self.max_cycles_label.setObjectName("fieldLabel")
         self.max_cycles_spin = QSpinBox()
@@ -150,8 +150,8 @@ class MainWindow(QMainWindow):
 
         agents_panel = self._panel()
         agents_layout = QHBoxLayout(agents_panel)
-        agents_layout.setContentsMargins(18, 14, 18, 14)
-        agents_layout.setSpacing(10)
+        agents_layout.setContentsMargins(14, 8, 14, 8)
+        agents_layout.setSpacing(8)
 
         self.planner_status = QLabel()
         self.executor_status = QLabel()
@@ -183,8 +183,8 @@ class MainWindow(QMainWindow):
 
         run_panel = self._panel()
         run_layout = QHBoxLayout(run_panel)
-        run_layout.setContentsMargins(18, 12, 18, 12)
-        run_layout.setSpacing(14)
+        run_layout.setContentsMargins(14, 7, 14, 7)
+        run_layout.setSpacing(10)
         self.cycle_label = QLabel("Ciclo: 0/5")
         self.timer_label = QLabel("Tempo: 00:00:00")
         self.progress_bar = QProgressBar()
@@ -205,7 +205,8 @@ class MainWindow(QMainWindow):
 
         self.logs_panel = self._panel()
         logs_layout = QVBoxLayout(self.logs_panel)
-        logs_layout.setContentsMargins(18, 14, 18, 14)
+        logs_layout.setContentsMargins(14, 8, 14, 8)
+        logs_layout.setSpacing(6)
         logs_header = QHBoxLayout()
         logs_title = QLabel("LOGS DA EXECUÇÃO")
         logs_title.setObjectName("sectionTitle")
@@ -234,8 +235,8 @@ class MainWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("agentCard")
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(16, 12, 16, 12)
-        card_layout.setSpacing(4)
+        card_layout.setContentsMargins(12, 8, 12, 8)
+        card_layout.setSpacing(3)
 
         name_label = QLabel(name)
         name_label.setObjectName("agentName")
@@ -245,7 +246,7 @@ class MainWindow(QMainWindow):
 
         card_layout.addWidget(name_label)
         card_layout.addWidget(role_label)
-        card_layout.addSpacing(4)
+        card_layout.addSpacing(2)
         card_layout.addWidget(status_label)
         return card
 
@@ -268,8 +269,11 @@ class MainWindow(QMainWindow):
                 font-family: "Segoe UI";
                 font-size: 13px;
             }
+            QLabel {
+                background: transparent;
+            }
             QLabel#title {
-                font-size: 24px;
+                font-size: 23px;
                 font-weight: 700;
                 letter-spacing: 1px;
             }
@@ -281,7 +285,7 @@ class MainWindow(QMainWindow):
                 background: #3a2f18;
                 border: 1px solid #6d5727;
                 border-radius: 11px;
-                padding: 5px 10px;
+                padding: 4px 9px;
                 font-weight: 600;
             }
             QFrame#panel {
@@ -327,15 +331,15 @@ class MainWindow(QMainWindow):
                 background: #111318;
                 border: 1px solid #39414d;
                 border-radius: 7px;
-                padding: 8px;
+                padding: 6px;
                 selection-background-color: #2563eb;
             }
             QTextEdit:focus, QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus {
                 border: 1px solid #4c8dff;
             }
             QPushButton {
-                min-height: 34px;
-                padding: 4px 16px;
+                min-height: 30px;
+                padding: 3px 14px;
                 border-radius: 7px;
                 border: 1px solid #3b4350;
                 background: #292e37;
@@ -430,8 +434,8 @@ class MainWindow(QMainWindow):
                 border-radius: 5px;
             }
             QPushButton#clearLogButton {
-                min-height: 28px;
-                padding: 2px 12px;
+                min-height: 26px;
+                padding: 2px 10px;
                 color: #b7c0cc;
                 background: #252a32;
             }
