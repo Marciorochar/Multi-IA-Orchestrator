@@ -10,7 +10,6 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -250,20 +249,6 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(status_label)
         return card
 
-    @staticmethod
-    def _add_agent_row(layout, row, name, role, status_label) -> None:
-        name_label = QLabel(name)
-        name_label.setObjectName("agentName")
-        role_label = QLabel(role)
-        role_label.setObjectName("agentRole")
-        status_label.setObjectName("agentStatus")
-        layout.addWidget(name_label, row, 0)
-        layout.addWidget(role_label, row, 1)
-        layout.addWidget(status_label, row, 2)
-        layout.setColumnStretch(0, 1)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(2, 2)
-
     def _connect_ui(self) -> None:
         self.goal_edit.textChanged.connect(self._validate_inputs)
         self.repo_edit.textChanged.connect(self._validate_inputs)
@@ -308,6 +293,23 @@ class MainWindow(QMainWindow):
                 background: #191d23;
                 border: 1px solid #353d49;
                 border-radius: 10px;
+            }
+            QFrame#agentCard[agentState="waiting"] {
+                background: #191d23;
+                border-color: #353d49;
+            }
+            QFrame#agentCard[agentState="active"] {
+                background: #172b43;
+                border-color: #3f78b4;
+            }
+            QFrame#agentCard[agentState="completed"] {
+                background: #173326;
+                border-color: #357653;
+            }
+            QFrame#agentCard[agentState="failed"],
+            QFrame#agentCard[agentState="cancelled"] {
+                background: #402027;
+                border-color: #8f3f4b;
             }
             QLabel#flowArrow {
                 color: #5d6878;
@@ -530,14 +532,29 @@ class MainWindow(QMainWindow):
         label.setText(f"{glyph}  {text}")
         color = {
             "Aguardando": "#8d96a5",
-            "Planejando": "#69a7ff",
-            "Executando": "#69a7ff",
-            "Auditando": "#69a7ff",
-            "Concluído": "#62c58b",
-            "Falhou": "#ef6b73",
-            "Cancelado": "#ef6b73",
+            "Planejando": "#8bc1ff",
+            "Executando": "#8bc1ff",
+            "Auditando": "#8bc1ff",
+            "Concluído": "#8ed7aa",
+            "Falhou": "#ff9aa3",
+            "Cancelado": "#ff9aa3",
         }.get(text, "#f3f4f6")
         label.setStyleSheet(f"color: {color}; font-weight: 600;")
+
+        state = {
+            "Aguardando": "waiting",
+            "Planejando": "active",
+            "Executando": "active",
+            "Auditando": "active",
+            "Concluído": "completed",
+            "Falhou": "failed",
+            "Cancelado": "cancelled",
+        }.get(text, "waiting")
+        card = self.agent_cards.get(role)
+        if card is not None:
+            card.setProperty("agentState", state)
+            card.style().unpolish(card)
+            card.style().polish(card)
 
     def _on_worker_event(self, event: dict) -> None:
         event_type = event.get("type")

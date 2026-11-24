@@ -1,6 +1,6 @@
 # Multi-IA Orchestrator
 
-> **Status:** núcleo MVP disponível na `main`; interface desktop PySide6 em desenvolvimento na branch `feat/pyside6-gui`. Integrações reais continuam bloqueadas pela Task 0.
+> **Status:** núcleo MVP e interface desktop PySide6 disponíveis na `main`. O dashboard visual está em refinamento final; integrações reais continuam bloqueadas pela Task 0.
 
 ## Visão geral
 
@@ -50,7 +50,7 @@ Resultados parciais não podem avançar o fluxo. Cada agente recebe um resumo ve
 | Workspace Manager | Isolamento e inspeção de mudanças | Git, worktrees |
 | Safety Controller | Aprovações, limites, permissões | Regras explícitas |
 | Observabilidade | Eventos e evidências | Logs estruturados |
-| Interface gráfica (fase posterior) | Monitoramento e controles | PySide6 |
+| Interface gráfica | Dashboard operacional, monitoramento e controles | PySide6 |
 
 ### Contratos de agentes
 
@@ -83,7 +83,7 @@ A execução foi detalhada em [docs/superpowers/plans/2026-11-23-multi-ia-orches
 | 6 | Integrações reais, condicionadas à Etapa 0 |
 | 7 | CLI do MVP e ensaio completo |
 
-A interface PySide6 e o empacotamento serão objeto de plano separado, após a validação do MVP.
+A interface PySide6 já foi implementada. O empacotamento e as integrações reais permanecem em fases separadas.
 
 ## Critérios de sucesso
 
@@ -117,7 +117,7 @@ python -m multi_ia.cli resume --run-id demo-1 --goal "validar o fluxo" --repo .
 
 O comando `resume` recusa automaticamente checkpoints marcados como `needs_reconciliation`.
 
-**Estado atual:** Tasks 1–5 e CLI fake da Task 7 implementadas na branch de desenvolvimento. Nenhuma integração real com ChatGPT, Antigravity ou Codex foi alegada ou testada.
+**Estado atual:** Tasks 1–5, CLI fake da Task 7 e interface PySide6 estão disponíveis na `main`. Nenhuma integração real com ChatGPT, Antigravity ou Codex foi alegada ou testada.
 
 
 ## Interface desktop PySide6
@@ -163,4 +163,4 @@ O botão **Pausar** é cooperativo: a pausa acontece em limites seguros entre et
 
 ### Dashboard operacional refinado
 
-A interface foi refinada para uso operacional diário: configuração mais compacta, fluxo visual **ChatGPT → Antigravity → Codex**, barra de progresso por ciclos, badge de estado destacado e painel de logs ampliado com limpeza somente visual. Uma nova execução limpa a visualização anterior dos logs sem apagar eventos ou checkpoints persistidos.
+A interface foi refinada para uso operacional diário: configuração mais compacta, fluxo visual **ChatGPT → Antigravity → Codex**, cards que mudam conforme o estado de cada agente, barra de progresso por ciclos, badge de estado destacado e painel de logs ampliado com limpeza somente visual. Uma nova execução limpa a visualização anterior dos logs sem apagar eventos ou checkpoints persistidos.
