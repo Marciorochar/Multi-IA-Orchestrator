@@ -163,3 +163,29 @@ def test_terminal_signal_does_not_unlock_before_thread_stops(app, tmp_path):
     window._thread = None
     window._set_running_ui(False)
     window.close()
+
+
+def test_dashboard_has_compact_configuration_and_operational_widgets(app, tmp_path):
+    window = MainWindow(db_path=tmp_path / "runs.sqlite")
+
+    assert window.browse_button.maximumWidth() <= 140
+    assert list(window.agent_cards) == ["planner", "executor", "auditor"]
+    assert window.progress_bar.minimum() == 0
+    assert window.progress_bar.maximum() == 100
+    assert window.progress_bar.value() == 0
+    assert window.clear_log_button.text() == "Limpar"
+    assert window.minimumWidth() >= 900
+    assert window.minimumHeight() >= 680
+
+    window.close()
+
+
+def test_agent_flow_is_explicit_left_to_right(app, tmp_path):
+    window = MainWindow(db_path=tmp_path / "runs.sqlite")
+
+    assert [label.text() for label in window.agent_flow_arrows] == ["→", "→"]
+    assert "ChatGPT" in window.agent_cards["planner"].toolTip()
+    assert "Antigravity" in window.agent_cards["executor"].toolTip()
+    assert "Codex" in window.agent_cards["auditor"].toolTip()
+
+    window.close()
