@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QPlainTextEdit,
+    QProgressBar,
+    QSizePolicy,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -71,7 +73,7 @@ class MainWindow(QMainWindow):
         title_row = QHBoxLayout()
         title = QLabel("MULTI-IA ORCHESTRATOR")
         title.setObjectName("title")
-        subtitle = QLabel("Controle sequencial de agentes")
+        subtitle = QLabel("Orquestração e auditoria multiagente")
         subtitle.setObjectName("subtitle")
         self.mode_label = QLabel("Modo simulado")
         self.mode_label.setObjectName("modeBadge")
@@ -85,36 +87,55 @@ class MainWindow(QMainWindow):
         layout.addLayout(title_row)
 
         input_panel = self._panel()
-        input_layout = QGridLayout(input_panel)
-        input_layout.setContentsMargins(18, 16, 18, 16)
-        input_layout.setHorizontalSpacing(10)
-        input_layout.setVerticalSpacing(8)
+        input_layout = QVBoxLayout(input_panel)
+        input_layout.setContentsMargins(18, 14, 18, 14)
+        input_layout.setSpacing(8)
 
-        input_layout.addWidget(QLabel("Objetivo"), 0, 0, 1, 3)
+        objective_label = QLabel("OBJETIVO")
+        objective_label.setObjectName("fieldLabel")
+        input_layout.addWidget(objective_label)
+
         self.goal_edit = QTextEdit()
         self.goal_edit.setPlaceholderText(
-            "Ex.: melhorar meu projeto, executar a tarefa e auditar o resultado"
+            "Ex.: analisar o projeto, executar a tarefa e auditar o resultado"
         )
-        self.goal_edit.setFixedHeight(82)
-        input_layout.addWidget(self.goal_edit, 1, 0, 1, 3)
+        self.goal_edit.setFixedHeight(72)
+        input_layout.addWidget(self.goal_edit)
 
-        input_layout.addWidget(QLabel("Repositório"), 2, 0, 1, 3)
+        repo_row = QHBoxLayout()
+        repo_row.setSpacing(10)
+
+        repo_block = QVBoxLayout()
+        repo_block.setSpacing(5)
+        repo_label = QLabel("REPOSITÓRIO")
+        repo_label.setObjectName("fieldLabel")
         self.repo_edit = QLineEdit()
         self.repo_edit.setPlaceholderText(r"C:\Users\marci\Desktop\MeuProjeto")
-        self.browse_button = QPushButton("Procurar...")
-        self.browse_button.setObjectName("secondaryButton")
-        input_layout.addWidget(self.repo_edit, 3, 0, 1, 2)
-        input_layout.addWidget(self.browse_button, 3, 2)
+        repo_block.addWidget(repo_label)
+        repo_block.addWidget(self.repo_edit)
+        repo_row.addLayout(repo_block, 1)
 
-        self.max_cycles_label = QLabel("Máximo de ciclos")
+        self.browse_button = QPushButton("Procurar")
+        self.browse_button.setObjectName("secondaryButton")
+        self.browse_button.setMaximumWidth(120)
+        self.browse_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        repo_row.addWidget(self.browse_button, 0, alignment=0x0080)
+
+        cycles_block = QVBoxLayout()
+        cycles_block.setSpacing(5)
+        self.max_cycles_label = QLabel("CICLOS")
+        self.max_cycles_label.setObjectName("fieldLabel")
         self.max_cycles_spin = QSpinBox()
         self.max_cycles_spin.setRange(1, 100)
         self.max_cycles_spin.setValue(5)
-        self.max_cycles_spin.setFixedWidth(90)
-        input_layout.addWidget(self.max_cycles_label, 4, 0)
-        input_layout.addWidget(self.max_cycles_spin, 4, 1)
+        self.max_cycles_spin.setFixedWidth(82)
+        cycles_block.addWidget(self.max_cycles_label)
+        cycles_block.addWidget(self.max_cycles_spin)
+        repo_row.addLayout(cycles_block)
+        input_layout.addLayout(repo_row)
 
         controls = QHBoxLayout()
+        controls.setSpacing(8)
         self.start_button = QPushButton("▶  INICIAR")
         self.start_button.setObjectName("startButton")
         self.pause_button = QPushButton("⏸  PAUSAR")
@@ -125,23 +146,37 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.pause_button)
         controls.addWidget(self.stop_button)
         controls.addStretch()
-        input_layout.addLayout(controls, 5, 0, 1, 3)
+        input_layout.addLayout(controls)
         layout.addWidget(input_panel)
 
         agents_panel = self._panel()
-        agents_layout = QGridLayout(agents_panel)
+        agents_layout = QHBoxLayout(agents_panel)
         agents_layout.setContentsMargins(18, 14, 18, 14)
-        agents_layout.setHorizontalSpacing(16)
-        agents_layout.setVerticalSpacing(12)
+        agents_layout.setSpacing(10)
 
         self.planner_status = QLabel()
         self.executor_status = QLabel()
         self.auditor_status = QLabel()
-        self._add_agent_row(agents_layout, 0, "ChatGPT", "Planejador", self.planner_status)
-        self._add_agent_row(
-            agents_layout, 1, "Antigravity", "Executor", self.executor_status
+        self.agent_cards: dict[str, QFrame] = {}
+        self.agent_flow_arrows: list[QLabel] = []
+
+        agent_specs = (
+            ("planner", "ChatGPT", "Planejador", self.planner_status),
+            ("executor", "Antigravity", "Executor", self.executor_status),
+            ("auditor", "Codex", "Auditor", self.auditor_status),
         )
-        self._add_agent_row(agents_layout, 2, "Codex", "Auditor", self.auditor_status)
+        for index, (role, name, role_name, status_label) in enumerate(agent_specs):
+            card = self._make_agent_card(name, role_name, status_label)
+            card.setToolTip(f"{name} — {role_name}")
+            self.agent_cards[role] = card
+            agents_layout.addWidget(card, 1)
+            if index < len(agent_specs) - 1:
+                arrow = QLabel("→")
+                arrow.setObjectName("flowArrow")
+                arrow.setAlignment(0x0084)
+                self.agent_flow_arrows.append(arrow)
+                agents_layout.addWidget(arrow)
+
         self._set_agent_status("planner", "Aguardando")
         self._set_agent_status("executor", "Aguardando")
         self._set_agent_status("auditor", "Aguardando")
@@ -150,12 +185,20 @@ class MainWindow(QMainWindow):
         run_panel = self._panel()
         run_layout = QHBoxLayout(run_panel)
         run_layout.setContentsMargins(18, 12, 18, 12)
+        run_layout.setSpacing(14)
         self.cycle_label = QLabel("Ciclo: 0/5")
         self.timer_label = QLabel("Tempo: 00:00:00")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("cycleProgress")
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("0%")
+        self.progress_bar.setMinimumWidth(220)
         self.state_label = QLabel("Estado: IDLE")
         self.state_label.setObjectName("stateLabel")
         run_layout.addWidget(self.cycle_label)
-        run_layout.addSpacing(24)
+        run_layout.addWidget(self.progress_bar, 1)
         run_layout.addWidget(self.timer_label)
         run_layout.addStretch()
         run_layout.addWidget(self.state_label)
@@ -164,12 +207,19 @@ class MainWindow(QMainWindow):
         logs_panel = self._panel()
         logs_layout = QVBoxLayout(logs_panel)
         logs_layout.setContentsMargins(18, 14, 18, 14)
-        logs_title = QLabel("Logs")
+        logs_header = QHBoxLayout()
+        logs_title = QLabel("LOGS DA EXECUÇÃO")
         logs_title.setObjectName("sectionTitle")
+        self.clear_log_button = QPushButton("Limpar")
+        self.clear_log_button.setObjectName("clearLogButton")
+        self.clear_log_button.setMaximumWidth(90)
+        logs_header.addWidget(logs_title)
+        logs_header.addStretch()
+        logs_header.addWidget(self.clear_log_button)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setPlaceholderText("Os eventos da execução aparecerão aqui.")
-        logs_layout.addWidget(logs_title)
+        logs_layout.addLayout(logs_header)
         logs_layout.addWidget(self.log_view, 1)
         layout.addWidget(logs_panel, 1)
 
@@ -178,6 +228,26 @@ class MainWindow(QMainWindow):
         panel = QFrame()
         panel.setObjectName("panel")
         return panel
+
+    @staticmethod
+    def _make_agent_card(name: str, role: str, status_label: QLabel) -> QFrame:
+        card = QFrame()
+        card.setObjectName("agentCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 12, 16, 12)
+        card_layout.setSpacing(4)
+
+        name_label = QLabel(name)
+        name_label.setObjectName("agentName")
+        role_label = QLabel(role)
+        role_label.setObjectName("agentRole")
+        status_label.setObjectName("agentStatus")
+
+        card_layout.addWidget(name_label)
+        card_layout.addWidget(role_label)
+        card_layout.addSpacing(4)
+        card_layout.addWidget(status_label)
+        return card
 
     @staticmethod
     def _add_agent_row(layout, row, name, role, status_label) -> None:
@@ -231,6 +301,23 @@ class MainWindow(QMainWindow):
                 background: #1d2026;
                 border: 1px solid #303640;
                 border-radius: 10px;
+            }
+            QFrame#agentCard {
+                background: #181b21;
+                border: 1px solid #353c47;
+                border-radius: 9px;
+            }
+            QLabel#flowArrow {
+                color: #5d6878;
+                font-size: 22px;
+                font-weight: 700;
+                padding: 0 2px;
+            }
+            QLabel#fieldLabel {
+                color: #9aa4b2;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.8px;
             }
             QTextEdit, QLineEdit, QPlainTextEdit, QSpinBox {
                 background: #111318;
@@ -286,6 +373,24 @@ class MainWindow(QMainWindow):
             QLabel#sectionTitle {
                 font-size: 15px;
                 font-weight: 700;
+            }
+            QProgressBar#cycleProgress {
+                background: #111318;
+                border: 1px solid #39414d;
+                border-radius: 6px;
+                min-height: 18px;
+                text-align: center;
+                color: #d7dde6;
+            }
+            QProgressBar#cycleProgress::chunk {
+                background: #2f78d1;
+                border-radius: 5px;
+            }
+            QPushButton#clearLogButton {
+                min-height: 28px;
+                padding: 2px 12px;
+                color: #b7c0cc;
+                background: #252a32;
             }
             """
         )
