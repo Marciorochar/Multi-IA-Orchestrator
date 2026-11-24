@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QThread, QTimer, QTime
+from PySide6.QtCore import QThread, QTimer, QTime, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -119,7 +119,7 @@ class MainWindow(QMainWindow):
         self.browse_button.setObjectName("secondaryButton")
         self.browse_button.setMaximumWidth(120)
         self.browse_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        repo_row.addWidget(self.browse_button, 0, alignment=0x0080)
+        repo_row.addWidget(self.browse_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
         cycles_block = QVBoxLayout()
         cycles_block.setSpacing(5)
@@ -173,7 +173,7 @@ class MainWindow(QMainWindow):
             if index < len(agent_specs) - 1:
                 arrow = QLabel("→")
                 arrow.setObjectName("flowArrow")
-                arrow.setAlignment(0x0084)
+                arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.agent_flow_arrows.append(arrow)
                 agents_layout.addWidget(arrow)
 
