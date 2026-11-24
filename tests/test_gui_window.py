@@ -272,3 +272,24 @@ def test_log_format_is_compact_without_brackets(app, tmp_path):
     assert "  Planner iniciado" in line
 
     window.close()
+
+
+def test_final_theme_prioritizes_state_and_logs(app, tmp_path):
+    window = MainWindow(db_path=tmp_path / "runs.sqlite")
+    root_layout = window.centralWidget().layout()
+
+    assert window.state_label.objectName() == "stateBadge"
+    assert 'QLabel#stateBadge[runState="COMPLETED"]' in window.styleSheet()
+    assert "QPushButton:disabled" in window.styleSheet()
+    assert "color: #98a2b3;" in window.styleSheet()
+    assert window.log_view.minimumHeight() >= 180
+
+    log_index = root_layout.indexOf(window.logs_panel)
+    assert log_index >= 0
+    assert root_layout.stretch(log_index) >= 1
+
+    assert "Aguardando" in window.planner_status.text()
+    assert "Aguardando" in window.executor_status.text()
+    assert "Aguardando" in window.auditor_status.text()
+
+    window.close()
