@@ -189,3 +189,86 @@ def test_agent_flow_is_explicit_left_to_right(app, tmp_path):
     assert "Codex" in window.agent_cards["auditor"].toolTip()
 
     window.close()
+
+
+def test_start_resets_visual_log_and_shows_starting_state(app, tmp_path):
+    window = MainWindow(
+        db_path=tmp_path / "runs.sqlite",
+        worker_factory=HoldingWorker,
+    )
+    window.log_view.setPlainText("execução anterior")
+    window.goal_edit.setPlainText("Nova execução")
+    window.repo_edit.setText(str(tmp_path))
+    app.processEvents()
+
+    window._start_run()
+    app.processEvents()
+
+    assert "execução anterior" not in window.log_view.toPlainText()
+    assert "Execução solicitada" in window.log_view.toPlainText()
+    assert window.state_label.text() == "Estado: INICIANDO"
+    assert window.cycle_label.text() == "Ciclo: 0/5"
+    assert window.progress_bar.value() == 0
+
+    window._shutdown_thread_for_test()
+
+
+def test_cycle_event_updates_and_clamps_progress(app, tmp_path):
+    window = MainWindow(db_path=tmp_path / "runs.sqlite")
+    window.max_cycles_spin.setValue(5)
+
+    window._on_worker_event({"type": "cycle_started", "cycle_id": 2})
+    assert window.cycle_label.text() == "Ciclo: 2/5"
+    assert window.progress_bar.value() == 40
+    assert window.progress_bar.format() == "40%"
+
+    window._on_worker_event({"type": "cycle_started", "cycle_id": 9})
+    assert window.progress_bar.value() == 100
+
+    window._on_worker_event({"type": "cycle_started", "cycle_id": -1})
+    assert window.progress_bar.value() == 0
+
+    window.close()
+
+
+def test_completed_forces_progress_to_100(app, tmp_path):
+    window = MainWindow(db_path=tmp_path / "runs.sqlite")
+    window.progress_bar.setValue(20)
+
+    window._on_worker_finished(
+        {"run_id": "x", "state": "completed", "reason": None, "mode": "fake"}
+    )
+
+    assert window.progress_bar.value() == 100
+    assert window.progress_bar.format() == "100%"
+    assert window.state_label.text() == "Estado: COMPLETED"
+
+    window.close()
+
+
+def test_clear_logs_is_visual_only(app, tmp_path):
+    db_path = tmp_path / "runs.sqlite"
+    db_path.write_bytes(b"sentinel")
+    window = MainWindow(db_path=db_path)
+    window.log_view.setPlainText("linha 1\nlinha 2")
+
+    window.clear_log_button.click()
+    app.processEvents()
+
+    assert window.log_view.toPlainText() == ""
+    assert db_path.read_bytes() == b"sentinel"
+
+    window.close()
+
+
+def test_log_format_is_compact_without_brackets(app, tmp_path):
+    window = MainWindow(db_path=tmp_path / "runs.sqlite")
+
+    window._append_log("Planner iniciado")
+    line = window.log_view.toPlainText().strip()
+
+    assert "[" not in line
+    assert "]" not in line
+    assert "  Planner iniciado" in line
+
+    window.close()
