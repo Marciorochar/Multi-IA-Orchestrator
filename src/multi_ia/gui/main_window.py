@@ -268,6 +268,7 @@ class MainWindow(QMainWindow):
         self.repo_edit.textChanged.connect(self._validate_inputs)
         self.max_cycles_spin.valueChanged.connect(self._update_cycle_limit)
         self.browse_button.clicked.connect(self._browse_repo)
+        self.clear_log_button.clicked.connect(self._clear_visual_logs)
         self.start_button.clicked.connect(self._start_run)
         self.pause_button.clicked.connect(self._toggle_pause)
         self.stop_button.clicked.connect(self._request_stop)
@@ -403,8 +404,11 @@ class MainWindow(QMainWindow):
 
     def _update_cycle_limit(self) -> None:
         current_text = self.cycle_label.text()
-        current = current_text.split(":", 1)[1].split("/", 1)[0].strip()
-        self.cycle_label.setText(f"Ciclo: {current}/{self.max_cycles_spin.value()}")
+        try:
+            current = int(current_text.split(":", 1)[1].split("/", 1)[0].strip())
+        except (IndexError, ValueError):
+            current = 0
+        self._update_progress(current)
 
     def _browse_repo(self) -> None:
         start = self.repo_edit.text().strip() or str(Path.home())
@@ -437,8 +441,11 @@ class MainWindow(QMainWindow):
         self._worker.failed.connect(lambda _error: self._request_thread_quit())
         self._thread.finished.connect(self._on_thread_finished)
 
+        self._clear_visual_logs()
         self._set_running_ui(True)
         self._reset_agent_statuses()
+        self._set_run_state("INICIANDO")
+        self._update_progress(0)
         self._started_at = time.monotonic()
         self.timer_label.setText("Tempo: 00:00:00")
         self._timer.start()
@@ -462,8 +469,8 @@ class MainWindow(QMainWindow):
     def _reset_agent_statuses(self) -> None:
         for role in ("planner", "executor", "auditor"):
             self._set_agent_status(role, "Aguardando")
-        self.state_label.setText("Estado: IDLE")
-        self.cycle_label.setText(f"Ciclo: 0/{self.max_cycles_spin.value()}")
+        self._set_run_state("IDLE")
+        self._update_progress(0)
 
     def _set_agent_status(self, role: str, text: str) -> None:
         label = {
@@ -497,9 +504,7 @@ class MainWindow(QMainWindow):
 
         if event_type == "cycle_started":
             cycle = int(event.get("cycle_id", 0))
-            self.cycle_label.setText(
-                f"Ciclo: {cycle}/{self.max_cycles_spin.value()}"
-            )
+            self._update_progress(cycle)
             self._append_log(f"Ciclo {cycle} iniciado")
             return
 
@@ -514,7 +519,7 @@ class MainWindow(QMainWindow):
                 self._set_agent_status(role, active_text)
             state = str(event.get("state", "")).upper()
             if state:
-                self.state_label.setText(f"Estado: {state}")
+                self._set_run_state(state)
             self._append_log(
                 {
                     "planner": "Planner iniciado",
@@ -542,15 +547,13 @@ class MainWindow(QMainWindow):
 
         if event_type == "state_changed":
             state = str(event.get("state", "unknown")).upper()
-            self.state_label.setText(f"Estado: {state}")
+            self._set_run_state(state)
             return
 
         if event_type == "pause_changed":
             paused = bool(event.get("paused"))
             self.pause_button.setText("▶  RETOMAR" if paused else "⏸  PAUSAR")
-            self.state_label.setText(
-                "Estado: PAUSA SOLICITADA" if paused else "Estado: RETOMANDO"
-            )
+            self._set_run_state("PAUSA SOLICITADA" if paused else "RETOMANDO")
             self._append_log("Pausa solicitada" if paused else "Execução retomada")
             return
 
@@ -576,16 +579,19 @@ class MainWindow(QMainWindow):
             return
         self._worker.request_stop()
         self.stop_button.setEnabled(False)
-        self.state_label.setText("Estado: CANCELAMENTO SOLICITADO")
+        self._set_run_state("CANCELAMENTO SOLICITADO")
 
     def _on_worker_finished(self, result: dict) -> None:
         state = str(result.get("state", "unknown")).upper()
-        self.state_label.setText(f"Estado: {state}")
+        self._set_run_state(state)
+        if state == "COMPLETED":
+            self.progress_bar.setValue(100)
+            self.progress_bar.setFormat("100%")
         self._append_log(f"Execução encerrada: {state}")
         self._finish_ui()
 
     def _on_worker_failed(self, message: str) -> None:
-        self.state_label.setText("Estado: FAILED")
+        self._set_run_state("FAILED")
         self._append_log(f"Erro: {message}")
         self._finish_ui()
 
@@ -610,6 +616,24 @@ class MainWindow(QMainWindow):
         if self._closing_requested:
             QTimer.singleShot(0, self.close)
 
+    def _set_run_state(self, state: str) -> None:
+        normalized = state.strip().upper() or "UNKNOWN"
+        self.state_label.setText(f"Estado: {normalized}")
+        self.state_label.setProperty("runState", normalized)
+        self.state_label.style().unpolish(self.state_label)
+        self.state_label.style().polish(self.state_label)
+
+    def _update_progress(self, cycle: int) -> None:
+        maximum = max(1, self.max_cycles_spin.value())
+        clamped = max(0, min(int(cycle), maximum))
+        percentage = int((clamped / maximum) * 100)
+        self.cycle_label.setText(f"Ciclo: {clamped}/{maximum}")
+        self.progress_bar.setValue(percentage)
+        self.progress_bar.setFormat(f"{percentage}%")
+
+    def _clear_visual_logs(self) -> None:
+        self.log_view.clear()
+
     def _update_timer(self) -> None:
         if self._started_at is None:
             return
@@ -620,7 +644,7 @@ class MainWindow(QMainWindow):
 
     def _append_log(self, message: str) -> None:
         stamp = QTime.currentTime().toString("HH:mm:ss")
-        self.log_view.appendPlainText(f"[{stamp}] {message}")
+        self.log_view.appendPlainText(f"{stamp}  {message}")
         scrollbar = self.log_view.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
