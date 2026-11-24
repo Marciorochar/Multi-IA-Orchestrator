@@ -139,3 +139,27 @@ def test_worker_error_does_not_close_window(app, tmp_path):
     assert "falha simulada" in window.log_view.toPlainText()
 
     window.close()
+
+
+def test_terminal_signal_does_not_unlock_before_thread_stops(app, tmp_path):
+    class StillRunningThread:
+        def isRunning(self):
+            return True
+
+    window = MainWindow(db_path=tmp_path / "runs.sqlite")
+    window.goal_edit.setPlainText("Meta")
+    window.repo_edit.setText(str(tmp_path))
+    window._set_running_ui(True)
+    window._thread = StillRunningThread()
+
+    window._on_worker_finished(
+        {"run_id": "x", "state": "completed", "reason": None, "mode": "fake"}
+    )
+
+    assert window.start_button.isEnabled() is False
+    assert window.goal_edit.isEnabled() is False
+    assert window.repo_edit.isEnabled() is False
+
+    window._thread = None
+    window._set_running_ui(False)
+    window.close()
