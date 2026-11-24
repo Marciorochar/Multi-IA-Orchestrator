@@ -103,3 +103,67 @@ def test_run_honors_max_cycles():
     assert calls == ["planner", "executor", "auditor"] * 2
     assert outcome.state is OrchestratorState.PAUSED
     assert outcome.reason == "max_cycles"
+
+
+def test_run_emits_stage_events_in_order():
+    events = []
+    calls = []
+    orchestrator = Orchestrator(
+        RecordingAdapter("planner", calls, completed({"plan": "p"})),
+        RecordingAdapter("executor", calls, completed({"result": "r"})),
+        RecordingAdapter("auditor", calls, completed({"approved": True})),
+        event_sink=events.append,
+    )
+
+    outcome = asyncio.run(orchestrator.run("run-events"))
+
+    assert outcome.state is OrchestratorState.COMPLETED
+    assert [event["type"] for event in events] == [
+        "run_started",
+        "cycle_started",
+        "stage_started",
+        "stage_completed",
+        "stage_started",
+        "stage_completed",
+        "stage_started",
+        "stage_completed",
+        "state_changed",
+        "run_completed",
+    ]
+    assert [
+        event["role"]
+        for event in events
+        if event["type"] == "stage_started"
+    ] == ["planner", "executor", "auditor"]
+
+
+def test_pause_holds_before_next_stage():
+    from multi_ia.policies import PauseController
+
+    calls = []
+    pause = PauseController()
+
+    class PausingPlanner(RecordingAdapter):
+        async def run(self, request):
+            self.calls.append(self.name)
+            pause.request_pause()
+            return self.result
+
+    orchestrator = Orchestrator(
+        PausingPlanner("planner", calls, completed({"plan": "p"})),
+        RecordingAdapter("executor", calls, completed({"result": "r"})),
+        RecordingAdapter("auditor", calls, completed({"approved": True})),
+        pause=pause,
+    )
+
+    async def scenario():
+        task = asyncio.create_task(orchestrator.run_cycle("run-pause", 1))
+        await asyncio.sleep(0.03)
+        assert calls == ["planner"]
+        pause.resume()
+        return await asyncio.wait_for(task, timeout=1)
+
+    outcome = asyncio.run(scenario())
+
+    assert outcome.state is OrchestratorState.COMPLETED
+    assert calls == ["planner", "executor", "auditor"]
