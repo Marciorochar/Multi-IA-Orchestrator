@@ -487,7 +487,8 @@ class MainWindow(QMainWindow):
     def _finish_ui(self) -> None:
         self._timer.stop()
         self._update_timer()
-        self._set_running_ui(False)
+        if self._thread is None or not self._thread.isRunning():
+            self._set_running_ui(False)
 
     def _request_thread_quit(self) -> None:
         if self._thread is not None and self._thread.isRunning():
@@ -497,6 +498,8 @@ class MainWindow(QMainWindow):
         self._worker = None
         thread = self._thread
         self._thread = None
+        if self._active:
+            self._set_running_ui(False)
         if thread is not None:
             thread.deleteLater()
         if self._closing_requested:
