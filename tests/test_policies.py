@@ -284,3 +284,43 @@ def test_consumed_operation_cannot_be_reapproved():
     with pytest.raises(ValueError):
         gate.approve(op, approved=True)
     assert gate.authorize(op) is not None
+
+
+def test_default_engine_cannot_dispatch_unknown_operation():
+    calls = []
+    engine = Orchestrator(
+        StaticAdapter(ok(operation_plan("unknown")), calls, "planner"),
+        StaticAdapter(ok(), calls, "executor"),
+        StaticAdapter(ok({"approved": True}), calls, "auditor"),
+    )
+    outcome = asyncio.run(engine.run_cycle("run-1", 1))
+    assert calls == ["planner"]
+    assert outcome.state is OrchestratorState.FAILED
+    assert outcome.reason == "permission_denied"
+
+
+def test_permission_check_uses_snapshot_of_dispatched_plan():
+    from multi_ia.contracts import Operation
+
+    plan = operation_plan()
+    gate = ApprovalGate()
+    gate.approve(Operation.from_plan(plan, run_id="run-1", cycle_id=1), approved=True)
+    observed = []
+
+    class ObservingExecutor:
+        async def run(self, request):
+            observed.append(request.payload["plan"])
+            return ok()
+
+    def observe(event):
+        if event["type"] == "stage_started" and event.get("role") == "executor":
+            plan["plan"] = "changed after approval"
+
+    engine = Orchestrator(
+        StaticAdapter(ok(plan)), ObservingExecutor(),
+        StaticAdapter(ok({"approved": True})),
+        approval_gate=gate, event_sink=observe,
+    )
+    outcome = asyncio.run(engine.run_cycle("run-1", 1))
+    assert outcome.state is OrchestratorState.COMPLETED
+    assert observed == ["change A"]
