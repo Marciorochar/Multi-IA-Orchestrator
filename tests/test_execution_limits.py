@@ -41,13 +41,42 @@ def test_policy_rejects_invalid_limits(kwargs):
         ExecutionPolicy(**params)
 
 
-def test_deadline_is_shared_by_stages():
+class ControlledClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def time(self):
+        return self.now
+
+    def monotonic(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class ClockAdapter(Adapter):
+    def __init__(self, role, calls, result, clock, advance=0):
+        super().__init__(role, calls, result)
+        self.clock = clock
+        self.advance = advance
+
+    async def run(self, request):
+        result = await super().run(request)
+        self.clock.advance(self.advance)
+        return result
+
+
+def test_deadline_is_shared_by_stages(monkeypatch):
+    from multi_ia import limits
+    clock = ControlledClock()
+    monkeypatch.setattr(limits, "time", clock)
     calls = []
     engine = Orchestrator(
-        Adapter("planner", calls, done(), .04),
-        Adapter("executor", calls, done(), .04),
-        Adapter("auditor", calls, done({"approved": True})),
-        policy=ExecutionPolicy(1, .06, 0),
+        ClockAdapter("planner", calls, done(), clock, 4),
+        ClockAdapter("executor", calls, done(), clock, 4),
+        ClockAdapter("auditor", calls, done({"approved": True}), clock),
+        policy=ExecutionPolicy(1, 6, 0),
     )
     result = asyncio.run(engine.run("r"))
     assert result.reason == "timeout"
@@ -84,13 +113,16 @@ def test_direct_cycle_cannot_bypass_cycle_limit():
     assert calls == []
 
 
-def test_deadline_is_shared_across_cycles():
+def test_deadline_is_shared_across_cycles(monkeypatch):
+    from multi_ia import limits
+    clock = ControlledClock()
+    monkeypatch.setattr(limits, "time", clock)
     calls = []
     engine = Orchestrator(
-        Adapter("planner", calls, done(), .04),
-        Adapter("executor", calls, done()),
-        Adapter("auditor", calls, done({"approved": False})),
-        policy=ExecutionPolicy(3, .06, 0),
+        ClockAdapter("planner", calls, done(), clock, 4),
+        ClockAdapter("executor", calls, done(), clock),
+        ClockAdapter("auditor", calls, done({"approved": False}), clock),
+        policy=ExecutionPolicy(3, 6, 0),
     )
     result = asyncio.run(engine.run("r"))
     assert result.reason == "timeout"
