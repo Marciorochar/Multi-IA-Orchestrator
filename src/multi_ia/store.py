@@ -73,7 +73,53 @@ class RunStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recovery_runs (
+                run_id TEXT PRIMARY KEY,
+                config_digest TEXT NOT NULL,
+                schema_version INTEGER NOT NULL
+            )
+            """
+        )
         self._conn.commit()
+
+    def register_run(self, run_id: str, config_digest: str) -> None:
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            if (self.load_checkpoint(run_id) is not None
+                    or self.run_registration(run_id) is not None
+                    or self.list_operations(run_id)):
+                raise JournalBlocked("run_already_exists")
+            self._conn.execute(
+                "INSERT INTO recovery_runs VALUES (?, ?, 1)",
+                (run_id, config_digest),
+            )
+            self._write_checkpoint(run_id, {
+                "schema_version": 1, "cycle_id": 1,
+                "state": "planning", "phase": "registered",
+            })
+
+    def run_registration(self, run_id: str) -> tuple | None:
+        return self._conn.execute(
+            "SELECT config_digest, schema_version FROM recovery_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+
+    def claim_audit(self, run_id: str, cycle_id: int) -> None:
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            checkpoint = self.load_checkpoint(run_id)
+            if not checkpoint or (
+                checkpoint.get("phase") != "executor_completed"
+                or checkpoint.get("cycle_id") != cycle_id
+                or checkpoint.get("write_status") != "confirmed"
+            ):
+                raise JournalBlocked("recovery_boundary_unsupported")
+            checkpoint["phase"] = "audit_started"
+            checkpoint["state"] = "auditing"
+            self._write_checkpoint(run_id, checkpoint)
+            self._write_event(run_id, {"type": "audit_started", "cycle_id": cycle_id})
 
     def append_event(self, run_id: str, event: dict) -> None:
         safe_event = _redact(event)
@@ -166,7 +212,7 @@ class RunStore:
                 "plan_digest": operation.plan_digest,
             })
 
-    def confirm_operation(self, operation: Operation) -> None:
+    def confirm_operation(self, operation: Operation, *, recovery: dict | None = None) -> None:
         """Commit confirmation for the exact reserved simulated operation."""
         if type(operation) is not Operation:
             raise ValueError("invalid operation")
@@ -183,12 +229,15 @@ class RunStore:
             )
             if cursor.rowcount != 1:
                 raise JournalBlocked("needs_reconciliation")
-            self._write_checkpoint(operation.run_id, {
+            checkpoint = {
                 "schema_version": 1, "cycle_id": operation.cycle_id,
                 "state": "executing", "phase": "executor_completed",
                 "operation_id": operation.operation_id,
                 "write_status": "confirmed",
-            })
+            }
+            if recovery is not None:
+                checkpoint["recovery"] = recovery
+            self._write_checkpoint(operation.run_id, checkpoint)
             self._write_event(operation.run_id, {
                 "type": "write_confirmed", "cycle_id": operation.cycle_id,
                 "operation_id": operation.operation_id,

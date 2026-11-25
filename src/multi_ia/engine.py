@@ -12,6 +12,7 @@ from multi_ia.adapters.base import AgentAdapter
 from multi_ia.contracts import AgentRequest, AgentResult, Operation, canonical_plan
 from multi_ia.policies import ApprovalGate, CancellationController, ExecutionPolicy, PauseController, ProgressGuard
 from multi_ia.store import JournalBlocked, RunStore
+from multi_ia.recovery import recovery_marker
 
 
 class OrchestratorState(str, Enum):
@@ -62,6 +63,7 @@ class Orchestrator:
         pause: PauseController | None = None,
         approval_gate: ApprovalGate | None = None,
         execution_mode: str = "fake",
+        recovery_enabled: bool = False,
     ) -> None:
         self.planner = planner
         self.executor = executor
@@ -74,6 +76,7 @@ class Orchestrator:
         self.pause = pause or PauseController()
         self.approval_gate = approval_gate if approval_gate is not None else ApprovalGate()
         self.execution_mode = execution_mode
+        self.recovery_enabled = recovery_enabled
         self.state = OrchestratorState.IDLE
 
     async def run(
@@ -206,6 +209,7 @@ class Orchestrator:
                     role="executor",
                     payload=planner_result.payload,
                 ),
+                recovery_plan=planner_result,
             )
             failure = self._validate_stage_result(executor_result, results, "executor")
             if failure is not None:
@@ -259,6 +263,13 @@ class Orchestrator:
                 CycleOutcome(state=self.state, results=results, reason="timeout"),
             )
 
+        return self._finish_audit(run_id, cycle_id, results, auditor_result)
+
+    def _finish_audit(
+        self, run_id: str, cycle_id: int, results: dict[str, AgentResult],
+        auditor_result: AgentResult,
+        *, recovered: bool = False,
+    ) -> CycleOutcome:
         decision = auditor_result.payload.get("approved")
         if type(decision) is not bool:
             self.state = OrchestratorState.FAILED
@@ -271,6 +282,13 @@ class Orchestrator:
             )
 
         self.state = OrchestratorState.EVALUATING
+        if decision is False and recovered:
+            self.state = OrchestratorState.PAUSED
+            return self._finish(
+                run_id, cycle_id, CycleOutcome(
+                    state=self.state, results=results, reason="recovery_review_required"
+                ),
+            )
         if decision is False:
             return self._finish(
                 run_id,
@@ -281,12 +299,46 @@ class Orchestrator:
         self.state = OrchestratorState.COMPLETED
         return self._finish(run_id, cycle_id, CycleOutcome(state=self.state, results=results))
 
+    async def _resume_confirmed_audit(
+        self, run_id: str, cycle_id: int,
+        planner_result: AgentResult, executor_result: AgentResult,
+    ) -> CycleOutcome:
+        """Internal service entry point: never dispatch a planner or executor."""
+        results = {"planner": planner_result, "executor": executor_result}
+        if self.execution_mode != "fake" or not self.recovery_enabled or self.store is None:
+            return CycleOutcome(OrchestratorState.FAILED, reason="recovery_boundary_unsupported")
+        try:
+            auditor_result = await self._run_stage(
+                adapter=self.auditor, state=OrchestratorState.AUDITING,
+                request=AgentRequest(
+                    run_id, cycle_id, "auditor",
+                    {"plan": planner_result.payload, "execution": executor_result.payload},
+                ),
+            )
+            failure = self._validate_stage_result(auditor_result, results, "auditor")
+            if failure is not None:
+                return self._finish(run_id, cycle_id, failure)
+        except JournalBlocked as exc:
+            self.state = OrchestratorState.FAILED
+            return CycleOutcome(self.state, reason=str(exc))
+        except sqlite3.Error:
+            self.state = OrchestratorState.FAILED
+            return CycleOutcome(self.state, reason="persistence_failure")
+        except (_StopRequested, _AdapterFailure, TimeoutError) as exc:
+            self.state = (OrchestratorState.CANCELLED if isinstance(exc, _StopRequested)
+                          else OrchestratorState.FAILED)
+            reason = ("stop_requested" if isinstance(exc, _StopRequested)
+                      else "timeout" if isinstance(exc, TimeoutError) else "adapter_exception")
+            return self._finish(run_id, cycle_id, CycleOutcome(self.state, results=results, reason=reason))
+        return self._finish_audit(run_id, cycle_id, results, auditor_result, recovered=True)
+
     async def _run_stage(
         self,
         *,
         adapter: AgentAdapter,
         state: OrchestratorState,
         request: AgentRequest,
+        recovery_plan: AgentResult | None = None,
     ) -> Any:
         if not await self.pause.wait_until_resumed(
             lambda: self._stop_requested(request.run_id)
@@ -309,6 +361,8 @@ class Orchestrator:
             if denial is not None:
                 raise _PermissionDenied(denial)
             request = replace(request, payload=snapshot)
+        if request.role == "auditor" and self.recovery_enabled and self.store is not None:
+            self.store.claim_audit(request.run_id, request.cycle_id)
         self.state = state
         self._emit(
             "stage_started",
@@ -361,7 +415,10 @@ class Orchestrator:
                 ):
                     raise _PermissionDenied("needs_reconciliation")
                 # Simulated completion only. Real mutation verification is not enabled.
-                self.store.confirm_operation(operation)
+                marker = None
+                if self.recovery_enabled and recovery_plan is not None:
+                    marker = recovery_marker(self.initial_payload, recovery_plan, result, operation)
+                self.store.confirm_operation(operation, recovery=marker)
         return result
 
     def _emit(self, event_type: str, **payload: Any) -> None:
