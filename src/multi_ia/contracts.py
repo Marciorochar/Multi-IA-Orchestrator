@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
 VALID_STATUSES = frozenset({"pending", "running", "completed", "failed", "cancelled"})
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+VALID_ROLES = frozenset({"planner", "executor", "auditor"})
+PROTOCOL_VERSION = "1.0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,14 +21,16 @@ class AgentRequest:
     protocol_version: str = "1.0"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.run_id, str) or not self.run_id.strip():
+        if type(self.run_id) is not str or not self.run_id.strip():
             raise ValueError("run_id must be a non-empty string")
-        if not isinstance(self.cycle_id, int) or self.cycle_id < 1:
+        if type(self.cycle_id) is not int or self.cycle_id < 1:
             raise ValueError("cycle_id must be a positive integer")
-        if not isinstance(self.role, str) or not self.role.strip():
-            raise ValueError("role must be a non-empty string")
-        if not isinstance(self.payload, dict):
-            raise ValueError("payload must be a dict")
+        if type(self.role) is not str or self.role not in VALID_ROLES:
+            raise ValueError("invalid role")
+        if type(self.protocol_version) is not str or self.protocol_version != PROTOCOL_VERSION:
+            raise ValueError("unsupported protocol version")
+        # Requests own their payload; adapter mutations cannot modify prior results.
+        object.__setattr__(self, "payload", json.loads(canonical_plan(self.payload)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,29 +41,93 @@ class AgentResult:
     protocol_version: str = "1.0"
 
     def __post_init__(self) -> None:
-        if self.status not in VALID_STATUSES:
-            raise ValueError(f"invalid status: {self.status}")
-        if not isinstance(self.payload, dict):
-            raise ValueError("payload must be a dict")
-        if not isinstance(self.evidence, list) or not all(
-            isinstance(item, str) and item.strip() for item in self.evidence
+        if type(self.status) is not str or self.status not in VALID_STATUSES:
+            raise ValueError("invalid status")
+        if type(self.protocol_version) is not str or self.protocol_version != PROTOCOL_VERSION:
+            raise ValueError("unsupported protocol version")
+        canonical_plan(self.payload)
+        if type(self.evidence) is not list or not all(
+            type(item) is str and item.strip() for item in self.evidence
         ):
             raise ValueError("evidence must be a list of non-empty strings")
         if self.status == "completed" and not self.evidence:
             raise ValueError("completed results require evidence")
+        for name in ("artifacts", "tests"):
+            if name in self.payload:
+                items = self.payload[name]
+                if type(items) is not list or not all(
+                    type(item) is str and item.strip() for item in items
+                ):
+                    raise ValueError("invalid progress evidence")
+        if "write_status" in self.payload and (
+            type(self.payload["write_status"]) is not str
+            or self.payload["write_status"] not in {
+                "confirmed", "unconfirmed", "needs_reconciliation"
+            }
+        ):
+            raise ValueError("invalid write status")
 
     @property
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
 
 
+def _check_json(value: Any) -> None:
+    kind = type(value)
+    if value is None or kind in (str, bool, int):
+        return
+    if kind is float and math.isfinite(value):
+        return
+    if kind is list:
+        for item in value:
+            _check_json(item)
+        return
+    if kind is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("JSON object keys must be strings")
+            _check_json(item)
+        return
+    raise ValueError("unsupported JSON value")
+
+
 def canonical_plan(payload: dict[str, Any]) -> str:
-    """Return a deterministic JSON snapshot of the proposed plan."""
+    """Return a deterministic, strict JSON snapshot of a payload."""
     if type(payload) is not dict:
-        raise ValueError("plan must be a dict")
-    return json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+        raise ValueError("payload must be a dict")
+    try:
+        _check_json(payload)
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, RecursionError, OverflowError):
+        raise ValueError("invalid JSON payload") from None
+
+
+def snapshot_result(result: AgentResult) -> AgentResult:
+    """Validate again at the adapter boundary and detach mutable fields."""
+    if type(result) is not AgentResult:
+        raise ValueError("invalid result type")
+    if type(result.evidence) is not list:
+        raise ValueError("invalid evidence")
+    return AgentResult(
+        status=result.status,
+        payload=json.loads(canonical_plan(result.payload)),
+        evidence=list(result.evidence),
+        protocol_version=result.protocol_version,
     )
+
+
+def audit_decision(result: AgentResult) -> bool:
+    """Only explicit, consistent decisions can authorize a transition."""
+    decision = result.payload.get("approved")
+    if type(decision) is not bool:
+        raise ValueError("invalid audit decision")
+    if "tests_passed" in result.payload:
+        tests_passed = result.payload["tests_passed"]
+        if type(tests_passed) is not bool or (decision and not tests_passed):
+            raise ValueError("inconsistent audit decision")
+    return decision
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from multi_ia.adapters.base import AgentAdapter
-from multi_ia.contracts import AgentRequest, AgentResult, Operation, VALID_STATUSES, canonical_plan
+from multi_ia.contracts import AgentRequest, AgentResult, Operation, VALID_STATUSES, audit_decision, canonical_plan, snapshot_result
 from multi_ia.policies import ApprovalGate, CancellationController, ExecutionLimitError, ExecutionPolicy, PauseController, ProgressGuard, RetryableReadError
 from multi_ia.limits import ExecutionLimits
 from multi_ia.store import JournalBlocked, RunStore
@@ -51,6 +51,10 @@ class _PermissionDenied(Exception):
 
 
 class _ObserverFailure(Exception):
+    pass
+
+
+class _ResultInvalid(Exception):
     pass
 
 
@@ -266,6 +270,11 @@ class Orchestrator:
             return self._finish(run_id, cycle_id, CycleOutcome(
                 self.state, results=results, reason="observer_failure"
             ))
+        except _ResultInvalid:
+            self.state = OrchestratorState.FAILED
+            return self._finish(run_id, cycle_id, CycleOutcome(
+                self.state, results=results, reason="invalid_result"
+            ))
         except JournalBlocked as exc:
             self.state = OrchestratorState.FAILED
             # Never overwrite an existing run's authoritative checkpoint.
@@ -319,8 +328,9 @@ class Orchestrator:
         auditor_result: AgentResult,
         *, recovered: bool = False,
     ) -> CycleOutcome:
-        decision = auditor_result.payload.get("approved")
-        if type(decision) is not bool:
+        try:
+            decision = audit_decision(auditor_result)
+        except ValueError:
             self.state = OrchestratorState.FAILED
             return self._finish(
                 run_id,
@@ -377,6 +387,11 @@ class Orchestrator:
             self.state = OrchestratorState.FAILED
             return self._finish(run_id, cycle_id, CycleOutcome(
                 self.state, results=results, reason="observer_failure"
+            ))
+        except _ResultInvalid:
+            self.state = OrchestratorState.FAILED
+            return self._finish(run_id, cycle_id, CycleOutcome(
+                self.state, results=results, reason="invalid_result"
             ))
         except JournalBlocked as exc:
             self.state = OrchestratorState.FAILED
@@ -496,6 +511,12 @@ class Orchestrator:
         if self._stop_requested(request.run_id):
             raise _StopRequested
         limits.checkpoint()
+        # Freeze and validate adapter data before any observer or journal update.
+        if type(result) is AgentResult:
+            try:
+                result = snapshot_result(result)
+            except (ValueError, TypeError, AttributeError, RecursionError):
+                raise _ResultInvalid("invalid_result") from None
         self._emit(
             "stage_completed",
             run_id=request.run_id,
@@ -508,22 +529,15 @@ class Orchestrator:
         if self._stop_requested(request.run_id):
             raise _StopRequested
         limits.checkpoint()
-        if operation is not None and self.store is not None:
-            if isinstance(result, AgentResult) and result.status == "completed":
-                try:
-                    AgentResult(
-                        status=result.status, payload=result.payload,
-                        evidence=result.evidence, protocol_version=result.protocol_version,
-                    )
-                except (ValueError, TypeError):
-                    raise _PermissionDenied("needs_reconciliation") from None
-                write_status = result.payload.get("write_status")
-                if result.protocol_version != "1.0" or not (
-                    write_status == "confirmed"
-                    or (operation.action == "read" and "write_status" not in result.payload)
-                ):
-                    raise _PermissionDenied("needs_reconciliation")
-                # Simulated completion only. Real mutation verification is not enabled.
+        if operation is not None and type(result) is AgentResult and result.status == "completed":
+            write_status = result.payload.get("write_status")
+            if not (
+                write_status == "confirmed"
+                or (operation.action == "read" and "write_status" not in result.payload)
+            ):
+                raise _ResultInvalid("invalid_result")
+            if self.store is not None:
+                # Simulated completion only; not proof of real filesystem writes.
                 marker = None
                 if self.recovery_enabled and recovery_plan is not None:
                     marker = recovery_marker(self.initial_payload, recovery_plan, result, operation)
@@ -587,7 +601,7 @@ class Orchestrator:
         results: dict[str, AgentResult],
         role: str,
     ) -> CycleOutcome | None:
-        if not isinstance(result, AgentResult):
+        if type(result) is not AgentResult:
             self.state = OrchestratorState.FAILED
             return CycleOutcome(state=self.state, results=results, reason="malformed_result")
 
