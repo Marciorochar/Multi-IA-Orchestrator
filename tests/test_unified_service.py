@@ -136,3 +136,61 @@ def test_dirty_workspace_blocks_success_and_preserves_evidence(tmp_path):
         assert asyncio.run(service.resume("r")).reason == "workspace_reconciliation_required"
     finally:
         store.close()
+
+
+def test_status_never_reports_completion_with_workspace_pending(tmp_path, capsys):
+    db = tmp_path / "runs.sqlite"
+    store = RunStore(db)
+    try:
+        store.register_run("r", "test")
+        store.mark_workspace_pending("r")
+        store.save_checkpoint("r", {"state": "completed", "cycle_id": 1})
+        before = store.load_checkpoint("r")
+        assert main(["status", "--run-id", "r", "--db", str(db)]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["state"] != "completed"
+        assert payload["workspace_status"] == "pending"
+        assert payload["reason"] == "workspace_finalization_pending"
+        assert store.load_checkpoint("r") == before
+    finally:
+        store.close()
+
+
+def test_crash_in_git_workspace_blocks_resume(tmp_path):
+    import sys
+    repo = make_repo(tmp_path / "repo")
+    db = tmp_path / "runs.sqlite"
+    code = """
+import asyncio, os, sys
+from multi_ia.service import ExecutionService
+from multi_ia.store import RunStore
+from multi_ia.policies import ExecutionPolicy
+class CrashStore(RunStore):
+    def confirm_operation(self, *args, **kwargs):
+        super().confirm_operation(*args, **kwargs)
+        os._exit(74)
+service = ExecutionService(CrashStore(sys.argv[1]), goal="demo", repo=sys.argv[2],
+                           policy=ExecutionPolicy(1, 30, 0))
+asyncio.run(service.start("r"))
+"""
+    child = subprocess.run([sys.executable, "-c", code, str(db), str(repo)],
+                           capture_output=True, text=True, timeout=20)
+    assert child.returncode == 74, child.stderr
+    store = RunStore(db)
+    try:
+        assert store.workspace_status("r") == "pending"
+        assert store.list_operations("r")[0]["status"] == "confirmed"
+        lock = repo / ".git" / "multi-ia-writer.lock"
+        record = json.loads(lock.read_text(encoding="utf-8"))
+        workspace = Path(record["workspace"])
+        assert workspace.is_dir()
+        before = store.load_checkpoint("r")
+        events = []
+        service = ExecutionService(store, goal="demo", repo=str(repo),
+                                   policy=ExecutionPolicy(1, 30, 0), event_sink=events.append)
+        assert asyncio.run(service.resume("r")).reason == "workspace_reconciliation_required"
+        assert events == []
+        assert store.load_checkpoint("r") == before
+        assert lock.exists() and workspace.exists()
+    finally:
+        store.close()
