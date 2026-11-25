@@ -8,7 +8,8 @@ from pathlib import Path
 
 from multi_ia.contracts import Operation
 from multi_ia.engine import CycleOutcome, Orchestrator, OrchestratorState
-from multi_ia.policies import ExecutionPolicy
+from multi_ia.policies import ExecutionLimitError, ExecutionPolicy
+from multi_ia.limits import ExecutionLimits, initial_limits
 from multi_ia.recovery import PROFILE, digest, expected_results, fake_adapters, recovery_marker
 from multi_ia.store import JournalBlocked, RunStore
 
@@ -25,6 +26,7 @@ class ExecutionService:
         self.policy = policy
         self.supervised = supervised
         self.adapters = adapters if adapters is not None else fake_adapters()
+        self._builtin_adapters = self.adapters if adapters is None else None
         self.event_sink = event_sink
 
     @staticmethod
@@ -81,21 +83,35 @@ class ExecutionService:
         finally:
             conn.close()
 
-    def _engine(self, initial: dict) -> Orchestrator:
+    def _known_zero_cost(self) -> bool:
+        return self._builtin_adapters is not None and self.adapters is self._builtin_adapters
+
+    def _limits(self, run_id: str) -> ExecutionLimits:
+        return ExecutionLimits(self.policy, store=self.store, run_id=run_id,
+                               known_zero=self._known_zero_cost())
+
+    def _engine(self, initial: dict, limits: ExecutionLimits) -> Orchestrator:
         return Orchestrator(
             *self.adapters, store=self.store, policy=self.policy,
             initial_payload=initial, event_sink=self.event_sink,
-            execution_mode="fake", recovery_enabled=True,
+            execution_mode="fake", recovery_enabled=True, limits=limits,
         )
 
     async def start(self, run_id: str) -> CycleOutcome:
         try:
             with self._lease(run_id):
                 initial, config_digest = self._context()
-                self.store.register_run(run_id, config_digest)
-                return await self._engine(initial).run(run_id)
-        except JournalBlocked as exc:
+                self.store.register_run(
+                    run_id, config_digest,
+                    limits=initial_limits(self.policy, known_zero=self._known_zero_cost()),
+                )
+                limits = self._limits(run_id)
+                limits.checkpoint()
+                return await self._engine(initial, limits).run(run_id)
+        except (JournalBlocked, ExecutionLimitError) as exc:
             return self._blocked(str(exc))
+        except TimeoutError:
+            return self._blocked("timeout")
         except (sqlite3.Error, OSError):
             return self._blocked("persistence_failure")
         except (ValueError, TypeError):
@@ -147,9 +163,13 @@ class ExecutionService:
                     }
                 ):
                     return self._blocked("recovery_evidence_invalid")
-                return await self._engine(initial)._resume_confirmed_audit(run_id, cycle, planner, executor)
-        except JournalBlocked as exc:
+                limits = self._limits(run_id)
+                limits.checkpoint()
+                return await self._engine(initial, limits)._resume_confirmed_audit(run_id, cycle, planner, executor)
+        except (JournalBlocked, ExecutionLimitError) as exc:
             return self._blocked(str(exc))
+        except TimeoutError:
+            return self._blocked("timeout")
         except (sqlite3.Error, OSError):
             return self._blocked("persistence_failure")
         except (ValueError, TypeError, KeyError):

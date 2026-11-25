@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from multi_ia.contracts import Operation
+from multi_ia.policies import ExecutionLimitError
 
 
 class JournalBlocked(RuntimeError):
@@ -82,9 +83,44 @@ class RunStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS execution_limits (
+                run_id TEXT PRIMARY KEY,
+                limits_json TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
 
-    def register_run(self, run_id: str, config_digest: str) -> None:
+    def load_limits(self, run_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT limits_json FROM execution_limits WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return None if row is None else json.loads(row[0])
+
+    def advance_limits(self, run_id: str, now: float, *, retry: bool = False) -> dict:
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            record = self.load_limits(run_id)
+            if record is None:
+                raise ExecutionLimitError("limits_evidence_missing")
+            if now < record["last_wall"]:
+                raise ExecutionLimitError("clock_regression")
+            if now >= record["deadline"]:
+                raise TimeoutError("timeout")
+            if retry:
+                if record["retries_used"] >= record["max_retries"]:
+                    raise ExecutionLimitError("retry_exhausted")
+                record["retries_used"] += 1
+            record["last_wall"] = now
+            self._conn.execute(
+                "UPDATE execution_limits SET limits_json = ? WHERE run_id = ?",
+                (json.dumps(record, sort_keys=True, allow_nan=False), run_id),
+            )
+        return record
+
+    def register_run(self, run_id: str, config_digest: str, *, limits: dict | None = None) -> None:
         with self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
             if (self.load_checkpoint(run_id) is not None
@@ -95,6 +131,11 @@ class RunStore:
                 "INSERT INTO recovery_runs VALUES (?, ?, 1)",
                 (run_id, config_digest),
             )
+            if limits is not None:
+                self._conn.execute(
+                    "INSERT INTO execution_limits VALUES (?, ?)",
+                    (run_id, json.dumps(limits, sort_keys=True, allow_nan=False)),
+                )
             self._write_checkpoint(run_id, {
                 "schema_version": 1, "cycle_id": 1,
                 "state": "planning", "phase": "registered",

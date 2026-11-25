@@ -10,7 +10,8 @@ from typing import Any
 
 from multi_ia.adapters.base import AgentAdapter
 from multi_ia.contracts import AgentRequest, AgentResult, Operation, canonical_plan
-from multi_ia.policies import ApprovalGate, CancellationController, ExecutionPolicy, PauseController, ProgressGuard
+from multi_ia.policies import ApprovalGate, CancellationController, ExecutionLimitError, ExecutionPolicy, PauseController, ProgressGuard, RetryableReadError
+from multi_ia.limits import ExecutionLimits
 from multi_ia.store import JournalBlocked, RunStore
 from multi_ia.recovery import recovery_marker
 
@@ -64,6 +65,7 @@ class Orchestrator:
         approval_gate: ApprovalGate | None = None,
         execution_mode: str = "fake",
         recovery_enabled: bool = False,
+        limits: ExecutionLimits | None = None,
     ) -> None:
         self.planner = planner
         self.executor = executor
@@ -77,7 +79,18 @@ class Orchestrator:
         self.approval_gate = approval_gate if approval_gate is not None else ApprovalGate()
         self.execution_mode = execution_mode
         self.recovery_enabled = recovery_enabled
+        self._provided_limits = limits
+        self._run_limits: dict[str, ExecutionLimits] = {}
         self.state = OrchestratorState.IDLE
+
+    def _limits_for(self, run_id: str) -> ExecutionLimits:
+        if self._provided_limits is not None:
+            if self._provided_limits.run_id != run_id:
+                raise ExecutionLimitError("limits_evidence_invalid")
+            return self._provided_limits
+        if run_id not in self._run_limits:
+            self._run_limits[run_id] = ExecutionLimits(self.policy)
+        return self._run_limits[run_id]
 
     async def run(
         self,
@@ -182,10 +195,13 @@ class Orchestrator:
             )
 
         try:
+            if not self.policy.allows_cycle(cycle_id):
+                return CycleOutcome(OrchestratorState.FAILED, reason="max_cycles")
             if self.store is not None:
                 reason = self.store.dispatch_block_reason(run_id, cycle_id)
                 if reason:
                     raise JournalBlocked(reason)
+            self._limits_for(run_id).checkpoint()
             planner_result = await self._run_stage(
                 adapter=self.planner,
                 state=OrchestratorState.PLANNING,
@@ -241,6 +257,11 @@ class Orchestrator:
                 run_id,
                 cycle_id,
                 CycleOutcome(state=self.state, results=results, reason="stop_requested"),
+            )
+        except ExecutionLimitError as exc:
+            self.state = OrchestratorState.FAILED
+            return self._finish(
+                run_id, cycle_id, CycleOutcome(self.state, results=results, reason=str(exc))
             )
         except _PermissionDenied as exc:
             self.state = OrchestratorState.FAILED
@@ -324,6 +345,9 @@ class Orchestrator:
         except sqlite3.Error:
             self.state = OrchestratorState.FAILED
             return CycleOutcome(self.state, reason="persistence_failure")
+        except ExecutionLimitError as exc:
+            self.state = OrchestratorState.FAILED
+            return CycleOutcome(self.state, reason=str(exc))
         except (_StopRequested, _AdapterFailure, TimeoutError) as exc:
             self.state = (OrchestratorState.CANCELLED if isinstance(exc, _StopRequested)
                           else OrchestratorState.FAILED)
@@ -340,12 +364,17 @@ class Orchestrator:
         request: AgentRequest,
         recovery_plan: AgentResult | None = None,
     ) -> Any:
-        if not await self.pause.wait_until_resumed(
-            lambda: self._stop_requested(request.run_id)
+        limits = self._limits_for(request.run_id)
+        if self._stop_requested(request.run_id):
+            raise _StopRequested
+        if not await asyncio.wait_for(
+            self.pause.wait_until_resumed(lambda: self._stop_requested(request.run_id)),
+            timeout=limits.checkpoint(),
         ):
             raise _StopRequested
         if self._stop_requested(request.run_id):
             raise _StopRequested
+        limits.checkpoint()
         operation = None
         if request.role == "executor":
             try:
@@ -378,18 +407,46 @@ class Orchestrator:
             )
         if self._stop_requested(request.run_id):
             raise _StopRequested
+        limits.checkpoint()
         if operation is not None and self.store is not None:
             self.store.begin_operation(operation)
-        try:
-            result = await asyncio.wait_for(
-                adapter.run(request),
-                timeout=self.policy.max_seconds,
-            )
-        except TimeoutError:
-            raise
-        except Exception:
-            # Do not propagate adapter-provided exception text into logs or UI.
-            raise _AdapterFailure("adapter_exception") from None
+        while True:
+            if self._stop_requested(request.run_id):
+                raise _StopRequested
+            timeout = limits.checkpoint()
+            try:
+                result = await asyncio.wait_for(adapter.run(request), timeout=timeout)
+            except TimeoutError:
+                raise
+            except RetryableReadError:
+                # Never retry executor or audit dispatch, even for a transient error.
+                if request.role != "planner":
+                    raise _AdapterFailure("adapter_exception") from None
+                if self._stop_requested(request.run_id):
+                    raise _StopRequested
+                if not await asyncio.wait_for(
+                    self.pause.wait_until_resumed(lambda: self._stop_requested(request.run_id)),
+                    timeout=limits.remaining(),
+                ):
+                    raise _StopRequested
+                limits.reserve_retry()
+                if self.store is not None:
+                    self.store.append_event(request.run_id, {
+                        "type": "retry_reserved", "role": request.role,
+                        "cycle_id": request.cycle_id,
+                        "retries_used": limits.record["retries_used"],
+                    })
+                self._emit("retry_reserved", run_id=request.run_id,
+                           cycle_id=request.cycle_id, role=request.role,
+                           retries_used=limits.record["retries_used"])
+                continue
+            except Exception:
+                # Do not propagate adapter-provided exception text into logs or UI.
+                raise _AdapterFailure("adapter_exception") from None
+            break
+        if self._stop_requested(request.run_id):
+            raise _StopRequested
+        limits.checkpoint()
         self._emit(
             "stage_completed",
             run_id=request.run_id,
@@ -399,6 +456,7 @@ class Orchestrator:
         )
         if self._stop_requested(request.run_id):
             raise _StopRequested
+        limits.checkpoint()
         if operation is not None and self.store is not None:
             if isinstance(result, AgentResult) and result.status == "completed":
                 try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,17 +17,29 @@ class ExecutionPolicy:
     max_budget: float | None = None
 
     def __post_init__(self) -> None:
-        if self.max_cycles < 1:
-            raise ValueError("max_cycles must be at least 1")
-        if self.max_seconds <= 0:
-            raise ValueError("max_seconds must be greater than zero")
-        if self.max_retries < 0:
-            raise ValueError("max_retries cannot be negative")
-        if self.max_budget is not None and self.max_budget < 0:
-            raise ValueError("max_budget cannot be negative")
+        if type(self.max_cycles) is not int or self.max_cycles < 1:
+            raise ValueError("max_cycles must be a positive integer")
+        if type(self.max_retries) is not int or self.max_retries < 0:
+            raise ValueError("max_retries must be a nonnegative integer")
+        if (type(self.max_seconds) not in (int, float)
+                or not math.isfinite(self.max_seconds) or self.max_seconds <= 0):
+            raise ValueError("max_seconds must be finite and positive")
+        if self.max_budget is not None and (
+            type(self.max_budget) not in (int, float)
+            or not math.isfinite(self.max_budget) or self.max_budget < 0
+        ):
+            raise ValueError("max_budget must be finite and nonnegative")
 
     def allows_cycle(self, cycle_id: int) -> bool:
-        return 1 <= cycle_id <= self.max_cycles
+        return type(cycle_id) is int and 1 <= cycle_id <= self.max_cycles
+
+
+class RetryableReadError(Exception):
+    """Trusted adapter reports a transient, side-effect-free planning failure."""
+
+
+class ExecutionLimitError(RuntimeError):
+    """A configured execution limit prevents further dispatch."""
 
 
 class CancellationController:
