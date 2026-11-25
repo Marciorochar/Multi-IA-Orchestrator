@@ -107,6 +107,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     workspace_status = store.workspace_status(args.run_id)
                     if workspace_status is not None:
                         payload["workspace_status"] = workspace_status
+                    if workspace_status == "pending" and payload.get("state") == "completed":
+                        # The engine checkpoint alone is not a final service outcome.
+                        payload["state"] = "waiting"
+                        payload["reason"] = "workspace_finalization_pending"
                     code = 0
         print(json.dumps(redact(payload), sort_keys=True))
         return code
