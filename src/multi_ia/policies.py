@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+from multi_ia.contracts import Operation
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,18 +41,53 @@ class CancellationController:
         self._stop_requested = True
 
 
-@dataclass(slots=True)
 class ApprovalGate:
-    dangerous_actions: set[str] = field(
-        default_factory=lambda: {"delete", "publish", "production", "write_external"}
-    )
-    _approved: set[str] = field(default_factory=set, init=False, repr=False)
+    """One-use grants for exact simulated operations; no real side effects authorized."""
 
-    def approve(self, action: str) -> None:
-        self._approved.add(action)
+    _APPROVAL_REQUIRED = frozenset({"write_workspace", "delete"})
+
+    def __init__(self) -> None:
+        self._approved: dict[tuple[str, int, str], Operation] = {}
+        self._consumed: set[tuple[str, int, str]] = set()
+        self._lock = threading.Lock()
 
     def check(self, action: str) -> bool:
-        return action not in self.dangerous_actions or action in self._approved
+        # Legacy callers cannot grant or check broad mutation permissions.
+        return type(action) is str and action == "read"
+
+    def approve(self, operation: Operation, *, approved: bool) -> None:
+        if type(approved) is not bool:
+            raise ValueError("explicit boolean decision required")
+        if type(operation) is not Operation or operation.action not in self._APPROVAL_REQUIRED:
+            raise ValueError("operation cannot receive approval in simulation mode")
+        with self._lock:
+            key = operation.identity
+            if key in self._consumed:
+                raise ValueError("operation already consumed")
+            existing = self._approved.get(key)
+            if existing is not None and existing != operation:
+                raise ValueError("approval identity already bound to different content")
+            if approved:
+                self._approved[key] = operation
+            else:
+                self._approved.pop(key, None)
+
+    def authorize(self, operation: Operation) -> str | None:
+        if type(operation) is not Operation:
+            return "permission_denied"
+        if operation.action == "read":
+            return None
+        if operation.action not in self._APPROVAL_REQUIRED:
+            return "permission_denied"
+        with self._lock:
+            key = operation.identity
+            if key in self._consumed:
+                return "operation_replayed"
+            if self._approved.get(key) != operation:
+                return "approval_required"
+            del self._approved[key]
+            self._consumed.add(key)
+        return None
 
 
 class ProgressGuard:

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from collections.abc import Callable
 from typing import Any
 
 from multi_ia.adapters.base import AgentAdapter
-from multi_ia.contracts import AgentRequest, AgentResult
-from multi_ia.policies import CancellationController, ExecutionPolicy, PauseController, ProgressGuard
+from multi_ia.contracts import AgentRequest, AgentResult, Operation, canonical_plan
+from multi_ia.policies import ApprovalGate, CancellationController, ExecutionPolicy, PauseController, ProgressGuard
 from multi_ia.store import RunStore
 
 
@@ -37,6 +38,14 @@ class _StopRequested(Exception):
     pass
 
 
+class _AdapterFailure(Exception):
+    pass
+
+
+class _PermissionDenied(Exception):
+    pass
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -50,6 +59,8 @@ class Orchestrator:
         initial_payload: dict[str, Any] | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
         pause: PauseController | None = None,
+        approval_gate: ApprovalGate | None = None,
+        execution_mode: str = "fake",
     ) -> None:
         self.planner = planner
         self.executor = executor
@@ -60,6 +71,8 @@ class Orchestrator:
         self.initial_payload = dict(initial_payload or {})
         self.event_sink = event_sink
         self.pause = pause or PauseController()
+        self.approval_gate = approval_gate if approval_gate is not None else ApprovalGate()
+        self.execution_mode = execution_mode
         self.state = OrchestratorState.IDLE
 
     async def run(
@@ -157,6 +170,13 @@ class Orchestrator:
     async def run_cycle(self, run_id: str, cycle_id: int) -> CycleOutcome:
         results: dict[str, AgentResult] = {}
 
+        if self.execution_mode != "fake":
+            self.state = OrchestratorState.FAILED
+            return self._finish(
+                run_id, cycle_id,
+                CycleOutcome(state=self.state, reason="real_mode_disabled"),
+            )
+
         try:
             planner_result = await self._run_stage(
                 adapter=self.planner,
@@ -206,6 +226,19 @@ class Orchestrator:
                 cycle_id,
                 CycleOutcome(state=self.state, results=results, reason="stop_requested"),
             )
+        except _PermissionDenied as exc:
+            self.state = OrchestratorState.FAILED
+            return self._finish(
+                run_id, cycle_id,
+                CycleOutcome(state=self.state, results=results, reason=str(exc)),
+            )
+        except _AdapterFailure:
+            self.state = OrchestratorState.FAILED
+            return self._finish(
+                run_id,
+                cycle_id,
+                CycleOutcome(state=self.state, results=results, reason="adapter_exception"),
+            )
         except TimeoutError:
             self.state = OrchestratorState.FAILED
             return self._finish(
@@ -214,8 +247,19 @@ class Orchestrator:
                 CycleOutcome(state=self.state, results=results, reason="timeout"),
             )
 
+        decision = auditor_result.payload.get("approved")
+        if type(decision) is not bool:
+            self.state = OrchestratorState.FAILED
+            return self._finish(
+                run_id,
+                cycle_id,
+                CycleOutcome(
+                    state=self.state, results=results, reason="invalid_audit_decision"
+                ),
+            )
+
         self.state = OrchestratorState.EVALUATING
-        if auditor_result.payload.get("approved") is False:
+        if decision is False:
             return self._finish(
                 run_id,
                 cycle_id,
@@ -238,6 +282,18 @@ class Orchestrator:
             raise _StopRequested
         if self._stop_requested(request.run_id):
             raise _StopRequested
+        if request.role == "executor":
+            try:
+                snapshot = json.loads(canonical_plan(request.payload))
+                operation = Operation.from_plan(
+                    snapshot, run_id=request.run_id, cycle_id=request.cycle_id
+                )
+            except (ValueError, TypeError, RecursionError):
+                raise _PermissionDenied("invalid_operation") from None
+            denial = self.approval_gate.authorize(operation)
+            if denial is not None:
+                raise _PermissionDenied(denial)
+            request = replace(request, payload=snapshot)
         self.state = state
         self._emit(
             "stage_started",
@@ -251,10 +307,16 @@ class Orchestrator:
                 request.run_id,
                 {"cycle_id": request.cycle_id, "state": state.value, "role": request.role},
             )
-        result = await asyncio.wait_for(
-            adapter.run(request),
-            timeout=self.policy.max_seconds,
-        )
+        try:
+            result = await asyncio.wait_for(
+                adapter.run(request),
+                timeout=self.policy.max_seconds,
+            )
+        except TimeoutError:
+            raise
+        except Exception:
+            # Do not propagate adapter-provided exception text into logs or UI.
+            raise _AdapterFailure("adapter_exception") from None
         self._emit(
             "stage_completed",
             run_id=request.run_id,
