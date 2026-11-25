@@ -87,7 +87,40 @@ class RunStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_runs (
+                run_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL CHECK(status IN ('pending', 'released'))
+            )
+            """
+        )
         self._conn.commit()
+
+    def workspace_status(self, run_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT status FROM workspace_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def mark_workspace_pending(self, run_id: str) -> None:
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            if self.run_registration(run_id) is None or self.workspace_status(run_id) is not None:
+                raise JournalBlocked("workspace_reconciliation_required")
+            self._conn.execute("INSERT INTO workspace_runs VALUES (?, 'pending')", (run_id,))
+            self._write_event(run_id, {"type": "workspace_preparing"})
+
+    def mark_workspace_released(self, run_id: str) -> None:
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            cursor = self._conn.execute(
+                "UPDATE workspace_runs SET status = 'released' WHERE run_id = ? AND status = 'pending'",
+                (run_id,),
+            )
+            if cursor.rowcount != 1:
+                raise JournalBlocked("workspace_reconciliation_required")
+            self._write_event(run_id, {"type": "workspace_released"})
 
     def load_limits(self, run_id: str) -> dict | None:
         row = self._conn.execute(

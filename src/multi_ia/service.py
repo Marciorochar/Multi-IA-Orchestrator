@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
 from multi_ia.contracts import Operation
 from multi_ia.engine import CycleOutcome, Orchestrator, OrchestratorState
-from multi_ia.policies import ExecutionLimitError, ExecutionPolicy
+from multi_ia.policies import CancellationController, ExecutionLimitError, ExecutionPolicy, PauseController
 from multi_ia.limits import ExecutionLimits, initial_limits
 from multi_ia.recovery import PROFILE, digest, expected_results, fake_adapters, recovery_marker
 from multi_ia.store import JournalBlocked, RunStore
+from multi_ia.workspace import WorkspaceManager
 
 
 class ExecutionService:
@@ -19,6 +22,8 @@ class ExecutionService:
         self, store: RunStore, *, goal: str, repo: str,
         policy: ExecutionPolicy, supervised: bool = False,
         adapters=None, event_sink=None,
+        cancellation: CancellationController | None = None,
+        pause: PauseController | None = None,
     ) -> None:
         self.store = store
         self.goal = goal
@@ -28,6 +33,8 @@ class ExecutionService:
         self.adapters = adapters if adapters is not None else fake_adapters()
         self._builtin_adapters = self.adapters if adapters is None else None
         self.event_sink = event_sink
+        self.cancellation = cancellation or CancellationController()
+        self.pause = pause or PauseController()
 
     @staticmethod
     def _blocked(reason: str) -> CycleOutcome:
@@ -90,12 +97,78 @@ class ExecutionService:
         return ExecutionLimits(self.policy, store=self.store, run_id=run_id,
                                known_zero=self._known_zero_cost())
 
-    def _engine(self, initial: dict, limits: ExecutionLimits) -> Orchestrator:
+    def _engine(self, initial: dict, limits: ExecutionLimits, *, event_sink=None) -> Orchestrator:
         return Orchestrator(
             *self.adapters, store=self.store, policy=self.policy,
-            initial_payload=initial, event_sink=self.event_sink,
+            initial_payload=initial, event_sink=self.event_sink if event_sink is None else event_sink,
+            cancellation=self.cancellation, pause=self.pause,
             execution_mode="fake", recovery_enabled=True, limits=limits,
         )
+
+    @staticmethod
+    def _requires_workspace(repo: str) -> bool:
+        # A selected nested directory belongs to the same Git worktree.
+        # A broken or inaccessible .git marker is not a non-Git fallback.
+        path = Path(repo)
+        return any(os.path.lexists(directory / ".git")
+                   for directory in (path, *path.parents))
+
+    def _workspace_failure(self, run_id: str, reason: str) -> CycleOutcome:
+        checkpoint = self.store.load_checkpoint(run_id) or {"cycle_id": 1}
+        checkpoint["state"] = "failed"
+        checkpoint["reason"] = reason
+        self.store.save_checkpoint(run_id, checkpoint)
+        return self._blocked(reason)
+
+    def _notify(self, event: dict) -> None:
+        if self.event_sink is not None:
+            try:
+                self.event_sink(event)
+            except Exception:
+                # Diagnostic delivery never changes a durable workspace decision.
+                pass
+
+    async def _start_managed(self, run_id: str, initial: dict,
+                             limits: ExecutionLimits) -> CycleOutcome:
+        source = initial["repo"]
+        manager = WorkspaceManager()
+        self.store.mark_workspace_pending(run_id)
+        self._notify({"type": "workspace_preparing", "run_id": run_id})
+        try:
+            workspace = manager.prepare(source, run_id)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            return self._workspace_failure(run_id, "workspace_unavailable")
+
+        terminal_events = []
+
+        def observe(event: dict) -> None:
+            if event.get("type") in {"state_changed", "run_completed", "run_failed",
+                                      "run_cancelled", "run_paused"}:
+                terminal_events.append(event)
+            elif self.event_sink is not None:
+                self.event_sink(event)
+
+        # All agents see the isolated checkout, not the original project path.
+        # A crash or unhandled exception leaves the durable pending marker and lock.
+        isolated = {**initial, "repo": workspace}
+        outcome = await self._engine(isolated, limits, event_sink=observe).run(run_id)
+        checkpoint = self.store.load_checkpoint(run_id)
+        if not self.store.can_replay_write(checkpoint) or any(
+            row["status"] == "pending" for row in self.store.list_operations(run_id)
+        ):
+            self._notify({"type": "workspace_reconciliation_required", "run_id": run_id})
+            return self._workspace_failure(run_id, "workspace_reconciliation_required")
+        try:
+            manager.release(source, workspace)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            self._notify({"type": "workspace_reconciliation_required", "run_id": run_id})
+            return self._workspace_failure(run_id, "workspace_reconciliation_required")
+        # Never announce completion before cleanup and its durable marker.
+        self.store.mark_workspace_released(run_id)
+        self._notify({"type": "workspace_released", "run_id": run_id})
+        for event in terminal_events:
+            self._notify(event)
+        return outcome
 
     async def start(self, run_id: str) -> CycleOutcome:
         try:
@@ -107,6 +180,12 @@ class ExecutionService:
                 )
                 limits = self._limits(run_id)
                 limits.checkpoint()
+                if (
+                    self._requires_workspace(initial["repo"])
+                    and not self.cancellation.stop_requested
+                    and not self.store.stop_requested(run_id)
+                ):
+                    return await self._start_managed(run_id, initial, limits)
                 return await self._engine(initial, limits).run(run_id)
         except (JournalBlocked, ExecutionLimitError) as exc:
             return self._blocked(str(exc))
@@ -123,6 +202,8 @@ class ExecutionService:
         try:
             with self._lease(run_id):
                 checkpoint = self.store.load_checkpoint(run_id)
+                if self.store.workspace_status(run_id) == "pending":
+                    return self._blocked("workspace_reconciliation_required")
                 journal = self.store.list_operations(run_id)
                 if not self.store.can_replay_write(checkpoint) or any(
                     row["status"] == "pending" for row in journal
@@ -146,6 +227,9 @@ class ExecutionService:
                     if not journal or journal[-1]["cycle_id"] != cycle or journal[-1]["status"] != "confirmed":
                         return self._blocked("recovery_evidence_invalid")
                     return CycleOutcome(OrchestratorState.COMPLETED)
+                if self._requires_workspace(initial["repo"]) or self.store.workspace_status(run_id) is not None:
+                    # A new checkout is not evidence of the prior workspace.
+                    return self._blocked("workspace_recovery_unsupported")
                 if checkpoint.get("phase") != "executor_completed" or checkpoint.get("state") != "executing":
                     return self._blocked("recovery_boundary_unsupported")
                 planner, executor = expected_results(initial)

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from multi_ia.gui.worker import OrchestratorWorker
+from multi_ia.paths import default_db_path
 
 
 class MainWindow(QMainWindow):
@@ -36,10 +37,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.worker_factory = worker_factory
-        self.db_path = Path(db_path) if db_path is not None else (
-            Path.home() / ".multi-ia-orchestrator" / "runs.sqlite"
-        )
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = Path(db_path) if db_path is not None else default_db_path()
 
         self._thread: QThread | None = None
         self._worker: OrchestratorWorker | None = None
@@ -563,6 +561,14 @@ class MainWindow(QMainWindow):
     def _on_worker_event(self, event: dict) -> None:
         event_type = event.get("type")
 
+        if event_type in {"workspace_preparing", "workspace_released", "workspace_reconciliation_required"}:
+            self._append_log({
+                "workspace_preparing": "Preparando workspace isolado",
+                "workspace_released": "Workspace liberado com segurança",
+                "workspace_reconciliation_required": "Workspace preservado: revisão necessária",
+            }[event_type])
+            return
+
         if event_type == "cycle_started":
             cycle = int(event.get("cycle_id", 0))
             self._update_progress(cycle)
@@ -649,6 +655,9 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(100)
             self.progress_bar.setFormat("100%")
         self._append_log(f"Execução encerrada: {state}")
+        reason = result.get("reason")
+        if reason:
+            self._append_log(f"Motivo: {reason}")
         self._finish_ui()
 
     def _on_worker_failed(self, message: str) -> None:

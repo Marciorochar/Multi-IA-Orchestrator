@@ -12,11 +12,12 @@ from multi_ia.service import ExecutionService
 from multi_ia.policies import ExecutionPolicy
 from multi_ia.store import RunStore
 from multi_ia.security import redact
+from multi_ia.paths import default_db_path, prepare_db_path
 
 
 def _execute(args: argparse.Namespace, *, resume: bool = False) -> int:
     try:
-        with closing(RunStore(args.db)) as store:
+        with closing(RunStore(prepare_db_path(args.db))) as store:
             policy = ExecutionPolicy(
                 max_cycles=args.max_cycles, max_seconds=args.max_seconds,
                 max_retries=args.max_retries, max_budget=args.max_budget,
@@ -57,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_run_args(command: argparse.ArgumentParser) -> None:
         command.add_argument("--run-id", required=True)
-        command.add_argument("--db", default="multi_ia.sqlite")
+        command.add_argument("--db", default=str(default_db_path()))
         command.add_argument("--goal", required=True)
         command.add_argument("--repo", default=".")
         command.add_argument("--supervised", action="store_true")
@@ -71,11 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status")
     status.add_argument("--run-id", required=True)
-    status.add_argument("--db", default="multi_ia.sqlite")
+    status.add_argument("--db", default=str(default_db_path()))
 
     stop = subparsers.add_parser("stop")
     stop.add_argument("--run-id", required=True)
-    stop.add_argument("--db", default="multi_ia.sqlite")
+    stop.add_argument("--db", default=str(default_db_path()))
 
     return parser
 
@@ -89,7 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _execute(args, resume=True)
 
     try:
-        with closing(RunStore(args.db)) as store:
+        with closing(RunStore(prepare_db_path(args.db))) as store:
             if args.command == "stop":
                 store.request_stop(args.run_id)
                 payload, code = {"run_id": args.run_id, "state": "stop_requested"}, 0
@@ -102,7 +103,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "stop_requested": store.stop_requested(args.run_id),
                     }, 1
                 else:
-                    payload, code = checkpoint, 0
+                    payload = dict(checkpoint)
+                    workspace_status = store.workspace_status(args.run_id)
+                    if workspace_status is not None:
+                        payload["workspace_status"] = workspace_status
+                    code = 0
         print(json.dumps(redact(payload), sort_keys=True))
         return code
     except (sqlite3.Error, OSError):
