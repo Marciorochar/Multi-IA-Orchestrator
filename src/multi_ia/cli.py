@@ -111,6 +111,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         # The engine checkpoint alone is not a final service outcome.
                         payload["state"] = "waiting"
                         payload["reason"] = "workspace_finalization_pending"
+                    elif payload.get("state") == "completed" and not store.has_completed_audit(
+                        args.run_id, payload.get("cycle_id")
+                    ):
+                        payload["state"] = "waiting"
+                        payload["reason"] = "audit_evidence_missing"
                     code = 0
         print(json.dumps(redact(payload), sort_keys=True))
         return code

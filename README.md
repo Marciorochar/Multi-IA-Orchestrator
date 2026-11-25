@@ -115,7 +115,7 @@ python -m multi_ia.cli stop --run-id demo-1
 python -m multi_ia.cli resume --run-id demo-1 --goal "validar o fluxo" --repo .
 ```
 
-O comando `resume` recusa automaticamente checkpoints incertos, legados sem evidência suficiente ou com workspace pendente. Somente a fronteira comprovada após confirmação do executor fake de diretório comum admite retomada de auditoria sem novo despacho.
+O comando `resume` recusa automaticamente checkpoints incertos, legados sem evidência suficiente ou com workspace pendente. A confirmação de conclusão exige também um recibo de aprovação do auditor vinculado ao journal; checkpoints antigos sem recibo ficam disponíveis para consulta, mas não são considerados conclusão verificada. Somente a fronteira comprovada após confirmação do executor fake de diretório comum admite retomada de auditoria sem novo despacho.
 
 ### Banco e workspace compartilhados
 

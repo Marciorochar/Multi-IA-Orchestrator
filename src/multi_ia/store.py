@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from dataclasses import asdict
 import sqlite3
 from pathlib import Path
 from typing import Any
 
-from multi_ia.contracts import Operation
+from multi_ia.contracts import AgentResult, Operation, audit_decision, canonical_plan, snapshot_result
 from multi_ia.policies import ExecutionLimitError
 
 
@@ -95,7 +97,82 @@ class RunStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_receipts (
+                run_id TEXT NOT NULL,
+                cycle_id INTEGER NOT NULL,
+                operation_id TEXT NOT NULL,
+                plan_digest TEXT NOT NULL,
+                result_digest TEXT NOT NULL,
+                version TEXT NOT NULL,
+                PRIMARY KEY (run_id, cycle_id)
+            )
+            """
+        )
         self._conn.commit()
+
+    def has_completed_audit(self, run_id: str, cycle_id: int) -> bool:
+        if type(cycle_id) is not int or cycle_id < 1:
+            return False
+        row = self._conn.execute(
+            """
+            SELECT a.result_digest FROM audit_receipts a
+            JOIN write_journal j ON j.run_id = a.run_id AND j.cycle_id = a.cycle_id
+                AND j.operation_id = a.operation_id AND j.plan_digest = a.plan_digest
+                AND j.version = a.version
+            WHERE a.run_id = ? AND a.cycle_id = ? AND a.version = '1.0'
+                AND j.status = 'confirmed'
+                AND NOT EXISTS (
+                    SELECT 1 FROM write_journal pending
+                    WHERE pending.run_id = a.run_id AND
+                    (pending.status = 'pending' OR pending.cycle_id > a.cycle_id)
+                )
+            """, (run_id, cycle_id),
+        ).fetchone()
+        return bool(row and type(row[0]) is str and len(row[0]) == 64
+                    and all(ch in "0123456789abcdef" for ch in row[0]))
+
+    def complete_audit(self, run_id: str, cycle_id: int, result: AgentResult) -> None:
+        """Atomically record validated simulated approval and terminal checkpoint."""
+        audit = snapshot_result(result)
+        if audit.status != "completed" or audit_decision(audit) is not True:
+            raise JournalBlocked("invalid_audit_decision")
+        result_digest = hashlib.sha256(
+            canonical_plan(asdict(audit)).encode("utf-8")
+        ).hexdigest()
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            checkpoint = self.load_checkpoint(run_id)
+            entries = self.list_operations(run_id)
+            if (
+                not checkpoint or not entries
+                or checkpoint.get("cycle_id") != cycle_id
+                or checkpoint.get("write_status") != "confirmed"
+                or checkpoint.get("phase") not in {"audit_started", "executor_completed"}
+                or (self.run_registration(run_id) is not None
+                    and checkpoint.get("phase") != "audit_started")
+                or entries[-1]["cycle_id"] != cycle_id
+                or entries[-1]["operation_id"] != checkpoint.get("operation_id")
+                or any(entry["status"] != "confirmed" for entry in entries)
+                or self.stop_requested(run_id)
+            ):
+                raise JournalBlocked("audit_evidence_invalid")
+            operation = entries[-1]
+            self._conn.execute(
+                "INSERT INTO audit_receipts VALUES (?, ?, ?, ?, ?, ?)",
+                (run_id, cycle_id, operation["operation_id"], operation["plan_digest"],
+                 result_digest, audit.protocol_version),
+            )
+            self._write_checkpoint(run_id, {
+                "schema_version": 1, "cycle_id": cycle_id,
+                "state": "completed", "phase": "audit_completed",
+                "operation_id": operation["operation_id"], "write_status": "confirmed",
+            })
+            self._write_event(run_id, {
+                "type": "audit_approved", "cycle_id": cycle_id,
+                "operation_id": operation["operation_id"], "result_digest": result_digest,
+            })
 
     def workspace_status(self, run_id: str) -> str | None:
         row = self._conn.execute(

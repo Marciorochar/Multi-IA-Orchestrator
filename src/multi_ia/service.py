@@ -226,6 +226,8 @@ class ExecutionService:
                 if checkpoint.get("state") == "completed":
                     if not journal or journal[-1]["cycle_id"] != cycle or journal[-1]["status"] != "confirmed":
                         return self._blocked("recovery_evidence_invalid")
+                    if not self.store.has_completed_audit(run_id, cycle):
+                        return self._blocked("audit_evidence_missing")
                     return CycleOutcome(OrchestratorState.COMPLETED)
                 if self._requires_workspace(initial["repo"]) or self.store.workspace_status(run_id) is not None:
                     # A new checkout is not evidence of the prior workspace.

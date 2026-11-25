@@ -633,7 +633,13 @@ class Orchestrator:
                 }:
                     checkpoint["write_status"] = write_status
             try:
-                self.store.save_checkpoint(run_id, checkpoint)
+                if outcome.state is OrchestratorState.COMPLETED:
+                    self.store.complete_audit(run_id, cycle_id, outcome.results["auditor"])
+                else:
+                    self.store.save_checkpoint(run_id, checkpoint)
+            except JournalBlocked as exc:
+                self.state = OrchestratorState.FAILED
+                return CycleOutcome(self.state, results=outcome.results, reason=str(exc))
             except sqlite3.Error:
                 self.state = OrchestratorState.FAILED
                 return CycleOutcome(
