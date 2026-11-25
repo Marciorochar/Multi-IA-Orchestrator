@@ -37,6 +37,10 @@ class _StopRequested(Exception):
     pass
 
 
+class _AdapterFailure(Exception):
+    pass
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -206,6 +210,13 @@ class Orchestrator:
                 cycle_id,
                 CycleOutcome(state=self.state, results=results, reason="stop_requested"),
             )
+        except _AdapterFailure:
+            self.state = OrchestratorState.FAILED
+            return self._finish(
+                run_id,
+                cycle_id,
+                CycleOutcome(state=self.state, results=results, reason="adapter_exception"),
+            )
         except TimeoutError:
             self.state = OrchestratorState.FAILED
             return self._finish(
@@ -214,8 +225,19 @@ class Orchestrator:
                 CycleOutcome(state=self.state, results=results, reason="timeout"),
             )
 
+        decision = auditor_result.payload.get("approved")
+        if type(decision) is not bool:
+            self.state = OrchestratorState.FAILED
+            return self._finish(
+                run_id,
+                cycle_id,
+                CycleOutcome(
+                    state=self.state, results=results, reason="invalid_audit_decision"
+                ),
+            )
+
         self.state = OrchestratorState.EVALUATING
-        if auditor_result.payload.get("approved") is False:
+        if decision is False:
             return self._finish(
                 run_id,
                 cycle_id,
@@ -251,10 +273,16 @@ class Orchestrator:
                 request.run_id,
                 {"cycle_id": request.cycle_id, "state": state.value, "role": request.role},
             )
-        result = await asyncio.wait_for(
-            adapter.run(request),
-            timeout=self.policy.max_seconds,
-        )
+        try:
+            result = await asyncio.wait_for(
+                adapter.run(request),
+                timeout=self.policy.max_seconds,
+            )
+        except TimeoutError:
+            raise
+        except Exception:
+            # Do not propagate adapter-provided exception text into logs or UI.
+            raise _AdapterFailure("adapter_exception") from None
         self._emit(
             "stage_completed",
             run_id=request.run_id,
