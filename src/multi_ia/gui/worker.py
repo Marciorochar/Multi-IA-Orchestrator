@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -67,29 +69,29 @@ class OrchestratorWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        store = RunStore(self.db_path)
         try:
-            planner, executor, auditor = self._fake_adapters()
-            orchestrator = Orchestrator(
-                planner,
-                executor,
-                auditor,
-                policy=ExecutionPolicy(
-                    max_cycles=self.max_cycles,
-                    max_seconds=self.max_seconds,
-                    max_retries=0,
-                ),
-                cancellation=self.cancellation,
-                pause=self.pause,
-                store=store,
-                initial_payload={
-                    "goal": self.goal,
-                    "repo": self.repo_path,
-                    "mode": "fake",
-                },
-                event_sink=self.event.emit,
-            )
-            outcome = asyncio.run(orchestrator.run(self.run_id))
+            with closing(RunStore(self.db_path)) as store:
+                planner, executor, auditor = self._fake_adapters()
+                orchestrator = Orchestrator(
+                    planner,
+                    executor,
+                    auditor,
+                    policy=ExecutionPolicy(
+                        max_cycles=self.max_cycles,
+                        max_seconds=self.max_seconds,
+                        max_retries=0,
+                    ),
+                    cancellation=self.cancellation,
+                    pause=self.pause,
+                    store=store,
+                    initial_payload={
+                        "goal": self.goal,
+                        "repo": self.repo_path,
+                        "mode": "fake",
+                    },
+                    event_sink=self.event.emit,
+                )
+                outcome = asyncio.run(orchestrator.run(self.run_id))
             self.finished.emit(
                 {
                     "run_id": self.run_id,
@@ -98,10 +100,12 @@ class OrchestratorWorker(QObject):
                     "mode": "fake",
                 }
             )
-        except Exception as exc:
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
-        finally:
-            store.close()
+        except (sqlite3.Error, OSError):
+            self.failed.emit("persistence_failure")
+        except ValueError:
+            self.failed.emit("invalid_run_configuration")
+        except Exception:
+            self.failed.emit("internal_failure")
 
     @Slot()
     def request_stop(self) -> None:
@@ -110,8 +114,5 @@ class OrchestratorWorker(QObject):
 
     @Slot()
     def toggle_pause(self) -> None:
-        if self.pause.paused:
-            self.pause.resume()
-        else:
-            self.pause.request_pause()
-        self.event.emit({"type": "pause_changed", "paused": self.pause.paused})
+        paused = self.pause.toggle()
+        self.event.emit({"type": "pause_changed", "paused": paused})

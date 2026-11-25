@@ -3,31 +3,34 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sqlite3
+from contextlib import closing
 from collections.abc import Sequence
 
 from multi_ia.engine import OrchestratorState
 from multi_ia.service import ExecutionService
 from multi_ia.policies import ExecutionPolicy
 from multi_ia.store import RunStore
+from multi_ia.security import redact
 
 
 def _execute(args: argparse.Namespace, *, resume: bool = False) -> int:
-    store = RunStore(args.db)
     try:
-        policy = ExecutionPolicy(
-            max_cycles=args.max_cycles, max_seconds=args.max_seconds,
-            max_retries=args.max_retries, max_budget=args.max_budget,
-        )
-        service = ExecutionService(
-            store, goal=args.goal, repo=args.repo, policy=policy,
-            supervised=args.supervised,
-        )
-        outcome = asyncio.run(service.resume(args.run_id) if resume else service.start(args.run_id))
+        with closing(RunStore(args.db)) as store:
+            policy = ExecutionPolicy(
+                max_cycles=args.max_cycles, max_seconds=args.max_seconds,
+                max_retries=args.max_retries, max_budget=args.max_budget,
+            )
+            service = ExecutionService(
+                store, goal=args.goal, repo=args.repo, policy=policy,
+                supervised=args.supervised,
+            )
+            outcome = asyncio.run(service.resume(args.run_id) if resume else service.start(args.run_id))
         payload = {
             "run_id": args.run_id, "state": outcome.state.value,
             "reason": outcome.reason, "mode": "fake",
         }
-        print(json.dumps(payload, sort_keys=True))
+        print(json.dumps(redact(payload), sort_keys=True))
         if outcome.state is OrchestratorState.COMPLETED:
             return 0
         if outcome.reason == "run_not_found":
@@ -35,8 +38,17 @@ def _execute(args: argparse.Namespace, *, resume: bool = False) -> int:
         if resume or outcome.reason in {"run_already_exists", "run_busy"}:
             return 3
         return 2
-    finally:
-        store.close()
+    except (sqlite3.Error, OSError):
+        return _failure("persistence_failure")
+    except ValueError:
+        return _failure("invalid_run_configuration")
+    except Exception:
+        return _failure("internal_failure")
+
+
+def _failure(reason: str) -> int:
+    print(json.dumps({"state": "failed", "reason": reason}, sort_keys=True))
+    return 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,30 +88,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "resume":
         return _execute(args, resume=True)
 
-    store = RunStore(args.db)
     try:
-        if args.command == "stop":
-            store.request_stop(args.run_id)
-            print(json.dumps({"run_id": args.run_id, "state": "stop_requested"}))
-            return 0
-
-        checkpoint = store.load_checkpoint(args.run_id)
-        if checkpoint is None:
-            print(
-                json.dumps(
-                    {
+        with closing(RunStore(args.db)) as store:
+            if args.command == "stop":
+                store.request_stop(args.run_id)
+                payload, code = {"run_id": args.run_id, "state": "stop_requested"}, 0
+            else:
+                checkpoint = store.load_checkpoint(args.run_id)
+                if checkpoint is None:
+                    payload, code = {
                         "run_id": args.run_id,
                         "state": "unknown",
                         "stop_requested": store.stop_requested(args.run_id),
-                    },
-                    sort_keys=True,
-                )
-            )
-            return 1
-        print(json.dumps(checkpoint, sort_keys=True))
-        return 0
-    finally:
-        store.close()
+                    }, 1
+                else:
+                    payload, code = checkpoint, 0
+        print(json.dumps(redact(payload), sort_keys=True))
+        return code
+    except (sqlite3.Error, OSError):
+        return _failure("persistence_failure")
+    except Exception:
+        return _failure("internal_failure")
 
 
 def entrypoint() -> None:

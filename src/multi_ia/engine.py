@@ -9,11 +9,12 @@ from collections.abc import Callable
 from typing import Any
 
 from multi_ia.adapters.base import AgentAdapter
-from multi_ia.contracts import AgentRequest, AgentResult, Operation, canonical_plan
+from multi_ia.contracts import AgentRequest, AgentResult, Operation, VALID_STATUSES, canonical_plan
 from multi_ia.policies import ApprovalGate, CancellationController, ExecutionLimitError, ExecutionPolicy, PauseController, ProgressGuard, RetryableReadError
 from multi_ia.limits import ExecutionLimits
 from multi_ia.store import JournalBlocked, RunStore
 from multi_ia.recovery import recovery_marker
+from multi_ia.security import redact
 
 
 class OrchestratorState(str, Enum):
@@ -46,6 +47,10 @@ class _AdapterFailure(Exception):
 
 
 class _PermissionDenied(Exception):
+    pass
+
+
+class _ObserverFailure(Exception):
     pass
 
 
@@ -100,11 +105,17 @@ class Orchestrator:
     ) -> CycleOutcome:
         guard = progress_guard or ProgressGuard()
         previous: dict = {}
-        self._emit("run_started", run_id=run_id)
+        try:
+            self._emit("run_started", run_id=run_id)
+        except _ObserverFailure:
+            return self._observer_abort(run_id, 1)
         last_outcome: CycleOutcome | None = None
 
         for cycle_id in range(1, self.policy.max_cycles + 1):
-            self._emit("cycle_started", run_id=run_id, cycle_id=cycle_id)
+            try:
+                self._emit("cycle_started", run_id=run_id, cycle_id=cycle_id)
+            except _ObserverFailure:
+                return self._observer_abort(run_id, cycle_id)
             outcome = await self.run_cycle(run_id, cycle_id)
             last_outcome = outcome
             if outcome.state in {
@@ -112,13 +123,13 @@ class Orchestrator:
                 OrchestratorState.CANCELLED,
                 OrchestratorState.FAILED,
             }:
-                self._emit("state_changed", run_id=run_id, state=outcome.state.value)
+                self._emit_terminal("state_changed", run_id=run_id, state=outcome.state.value)
                 terminal_type = {
                     OrchestratorState.COMPLETED: "run_completed",
                     OrchestratorState.CANCELLED: "run_cancelled",
                     OrchestratorState.FAILED: "run_failed",
                 }[outcome.state]
-                self._emit(
+                self._emit_terminal(
                     terminal_type,
                     run_id=run_id,
                     state=outcome.state.value,
@@ -153,8 +164,8 @@ class Orchestrator:
                         reason="no_progress",
                     ),
                 )
-                self._emit("state_changed", run_id=run_id, state=paused.state.value)
-                self._emit(
+                self._emit_terminal("state_changed", run_id=run_id, state=paused.state.value)
+                self._emit_terminal(
                     "run_paused",
                     run_id=run_id,
                     state=paused.state.value,
@@ -175,8 +186,8 @@ class Orchestrator:
                 reason="max_cycles",
             ),
         )
-        self._emit("state_changed", run_id=run_id, state=paused.state.value)
-        self._emit(
+        self._emit_terminal("state_changed", run_id=run_id, state=paused.state.value)
+        self._emit_terminal(
             "run_paused",
             run_id=run_id,
             state=paused.state.value,
@@ -244,6 +255,17 @@ class Orchestrator:
             failure = self._validate_stage_result(auditor_result, results, "auditor")
             if failure is not None:
                 return self._finish(run_id, cycle_id, failure)
+        except asyncio.CancelledError:
+            self.state = OrchestratorState.CANCELLED
+            self._finish(run_id, cycle_id, CycleOutcome(
+                self.state, results=results, reason="task_cancelled"
+            ))
+            raise
+        except _ObserverFailure:
+            self.state = OrchestratorState.FAILED
+            return self._finish(run_id, cycle_id, CycleOutcome(
+                self.state, results=results, reason="observer_failure"
+            ))
         except JournalBlocked as exc:
             self.state = OrchestratorState.FAILED
             # Never overwrite an existing run's authoritative checkpoint.
@@ -283,6 +305,12 @@ class Orchestrator:
                 cycle_id,
                 CycleOutcome(state=self.state, results=results, reason="timeout"),
             )
+
+        except Exception:
+            self.state = OrchestratorState.FAILED
+            return self._finish(run_id, cycle_id, CycleOutcome(
+                self.state, results=results, reason="internal_failure"
+            ))
 
         return self._finish_audit(run_id, cycle_id, results, auditor_result)
 
@@ -339,6 +367,17 @@ class Orchestrator:
             failure = self._validate_stage_result(auditor_result, results, "auditor")
             if failure is not None:
                 return self._finish(run_id, cycle_id, failure)
+        except asyncio.CancelledError:
+            self.state = OrchestratorState.CANCELLED
+            self._finish(run_id, cycle_id, CycleOutcome(
+                self.state, results=results, reason="task_cancelled"
+            ))
+            raise
+        except _ObserverFailure:
+            self.state = OrchestratorState.FAILED
+            return self._finish(run_id, cycle_id, CycleOutcome(
+                self.state, results=results, reason="observer_failure"
+            ))
         except JournalBlocked as exc:
             self.state = OrchestratorState.FAILED
             return CycleOutcome(self.state, reason=str(exc))
@@ -354,6 +393,11 @@ class Orchestrator:
             reason = ("stop_requested" if isinstance(exc, _StopRequested)
                       else "timeout" if isinstance(exc, TimeoutError) else "adapter_exception")
             return self._finish(run_id, cycle_id, CycleOutcome(self.state, results=results, reason=reason))
+        except Exception:
+            self.state = OrchestratorState.FAILED
+            return self._finish(run_id, cycle_id, CycleOutcome(
+                self.state, results=results, reason="internal_failure"
+            ))
         return self._finish_audit(run_id, cycle_id, results, auditor_result, recovered=True)
 
     async def _run_stage(
@@ -405,18 +449,23 @@ class Orchestrator:
                 request.run_id,
                 {"cycle_id": request.cycle_id, "state": state.value, "role": request.role},
             )
-        if self._stop_requested(request.run_id):
-            raise _StopRequested
-        limits.checkpoint()
+        # Observers may request pause/stop during stage_started. Recheck the
+        # boundary before creating a journal intent or scheduling the adapter.
+        await self._wait_dispatch(request.run_id, limits)
         if operation is not None and self.store is not None:
             self.store.begin_operation(operation)
         while True:
-            if self._stop_requested(request.run_id):
-                raise _StopRequested
+            await self._wait_dispatch(request.run_id, limits)
             timeout = limits.checkpoint()
+
+            async def invoke():
+                # Check again after scheduling, immediately before invocation.
+                await self._wait_dispatch(request.run_id, limits)
+                return await adapter.run(request)
+
             try:
-                result = await asyncio.wait_for(adapter.run(request), timeout=timeout)
-            except TimeoutError:
+                result = await asyncio.wait_for(invoke(), timeout=timeout)
+            except (_StopRequested, ExecutionLimitError, TimeoutError, sqlite3.Error):
                 raise
             except RetryableReadError:
                 # Never retry executor or audit dispatch, even for a transient error.
@@ -452,7 +501,9 @@ class Orchestrator:
             run_id=request.run_id,
             cycle_id=request.cycle_id,
             role=request.role,
-            status=getattr(result, "status", "invalid"),
+            status=(result.status if type(result) is AgentResult
+                    and type(result.status) is str and result.status in VALID_STATUSES
+                    else "invalid"),
         )
         if self._stop_requested(request.run_id):
             raise _StopRequested
@@ -479,10 +530,51 @@ class Orchestrator:
                 self.store.confirm_operation(operation, recovery=marker)
         return result
 
+    async def _wait_dispatch(self, run_id: str, limits: ExecutionLimits) -> None:
+        if self._stop_requested(run_id):
+            raise _StopRequested
+        if self.pause.paused:
+            if not await asyncio.wait_for(
+                self.pause.wait_until_resumed(lambda: self._stop_requested(run_id)),
+                timeout=limits.checkpoint(),
+            ):
+                raise _StopRequested
+        limits.checkpoint()
+        if self._stop_requested(run_id):
+            raise _StopRequested
+
+    def _observer_abort(self, run_id: str, cycle_id: int) -> CycleOutcome:
+        self.state = OrchestratorState.FAILED
+        outcome = CycleOutcome(self.state, reason="observer_failure")
+        if self.store is not None:
+            try:
+                if self.store.dispatch_block_reason(run_id, cycle_id):
+                    return outcome
+            except (sqlite3.Error, ValueError, TypeError):
+                return CycleOutcome(self.state, reason="persistence_failure")
+        return self._finish(run_id, cycle_id, outcome)
+
     def _emit(self, event_type: str, **payload: Any) -> None:
         if self.event_sink is None:
             return
-        self.event_sink({"type": event_type, **payload})
+        try:
+            self.event_sink(redact({"type": event_type, **payload}))
+        except Exception:
+            raise _ObserverFailure("observer_failure") from None
+
+    def _emit_terminal(self, event_type: str, **payload: Any) -> None:
+        # A delivery failure cannot undo a committed terminal outcome.
+        try:
+            self._emit(event_type, **payload)
+        except _ObserverFailure:
+            if self.store is not None:
+                try:
+                    self.store.append_event(payload["run_id"], {
+                        "type": "observer_failure", "phase": "terminal_notification"
+                    })
+                except Exception:
+                    # No raw exception or recursive observer call.
+                    pass
 
     def _stop_requested(self, run_id: str) -> bool:
         return self.cancellation.stop_requested or (
@@ -520,8 +612,12 @@ class Orchestrator:
             if outcome.reason is not None:
                 checkpoint["reason"] = outcome.reason
             executor_result = outcome.results.get("executor")
-            if executor_result is not None and "write_status" in executor_result.payload:
-                checkpoint["write_status"] = executor_result.payload["write_status"]
+            if executor_result is not None:
+                write_status = executor_result.payload.get("write_status")
+                if type(write_status) is str and write_status in {
+                    "confirmed", "unconfirmed", "needs_reconciliation"
+                }:
+                    checkpoint["write_status"] = write_status
             try:
                 self.store.save_checkpoint(run_id, checkpoint)
             except sqlite3.Error:

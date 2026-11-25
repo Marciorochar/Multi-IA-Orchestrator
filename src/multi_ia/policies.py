@@ -44,14 +44,14 @@ class ExecutionLimitError(RuntimeError):
 
 class CancellationController:
     def __init__(self) -> None:
-        self._stop_requested = False
+        self._stop_requested = threading.Event()
 
     @property
     def stop_requested(self) -> bool:
-        return self._stop_requested
+        return self._stop_requested.is_set()
 
     def request_stop(self) -> None:
-        self._stop_requested = True
+        self._stop_requested.set()
 
 
 class ApprovalGate:
@@ -136,17 +136,28 @@ class ProgressGuard:
 
 class PauseController:
     def __init__(self) -> None:
-        self._paused = False
+        self._paused = threading.Event()
+        self._lock = threading.Lock()
 
     @property
     def paused(self) -> bool:
-        return self._paused
+        return self._paused.is_set()
 
     def request_pause(self) -> None:
-        self._paused = True
+        with self._lock:
+            self._paused.set()
 
     def resume(self) -> None:
-        self._paused = False
+        with self._lock:
+            self._paused.clear()
+
+    def toggle(self) -> bool:
+        with self._lock:
+            if self._paused.is_set():
+                self._paused.clear()
+            else:
+                self._paused.set()
+            return self._paused.is_set()
 
     async def wait_until_resumed(
         self,
@@ -154,7 +165,7 @@ class PauseController:
         *,
         poll_seconds: float = 0.01,
     ) -> bool:
-        while self._paused:
+        while self.paused:
             if stop_requested():
                 return False
             await asyncio.sleep(poll_seconds)

@@ -12,24 +12,20 @@ from multi_ia.policies import ExecutionLimitError
 class JournalBlocked(RuntimeError):
     """A persisted operation cannot safely be dispatched."""
 
-SENSITIVE_KEYS = {"token", "password", "secret", "api_key", "authorization", "credential"}
-
-
-def _redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: ("<redacted>" if key.lower() in SENSITIVE_KEYS else _redact(item))
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact(item) for item in value]
-    return value
+from multi_ia.security import redact as _redact
 
 
 class RunStore:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         self._conn = sqlite3.connect(self.path)
+        try:
+            self._initialize()
+        except BaseException:
+            self._conn.close()
+            raise
+
+    def _initialize(self) -> None:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA busy_timeout=5000")

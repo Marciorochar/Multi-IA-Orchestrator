@@ -116,6 +116,8 @@ class ExecutionService:
             return self._blocked("persistence_failure")
         except (ValueError, TypeError):
             return self._blocked("invalid_run_configuration")
+        except Exception:
+            return self._blocked("internal_failure")
 
     async def resume(self, run_id: str) -> CycleOutcome:
         try:
@@ -174,3 +176,5 @@ class ExecutionService:
             return self._blocked("persistence_failure")
         except (ValueError, TypeError, KeyError):
             return self._blocked("recovery_evidence_invalid")
+        except Exception:
+            return self._blocked("internal_failure")
