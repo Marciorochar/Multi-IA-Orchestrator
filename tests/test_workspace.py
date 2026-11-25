@@ -235,3 +235,54 @@ def test_ignored_files_are_not_deleted_by_release(tmp_path):
         owner.release(str(repo), workspace)
     assert private.read_text(encoding="utf-8") == "preserve"
     assert (repo / ".git" / "multi-ia-writer.lock").exists()
+
+
+def test_nested_path_alias_uses_same_repository_lock(tmp_path):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    alias = repo / "subdir"
+    alias.mkdir()
+    owner = WorkspaceManager()
+    workspace = owner.prepare(str(repo), "owner")
+    try:
+        with pytest.raises(RuntimeError, match="writer"):
+            WorkspaceManager().prepare(str(alias), "other")
+    finally:
+        owner.release(str(alias), workspace)
+
+
+def test_owner_cannot_remove_unrelated_worktree(tmp_path):
+    from pathlib import Path
+
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    unrelated = tmp_path / "unrelated"
+    subprocess.run(["git", "worktree", "add", "--detach", str(unrelated), "HEAD"],
+                   cwd=repo, check=True, capture_output=True)
+    owner = WorkspaceManager()
+    workspace = owner.prepare(str(repo), "owner")
+    try:
+        with pytest.raises(RuntimeError, match="owner"):
+            owner.release(str(repo), str(unrelated))
+        assert unrelated.is_dir()
+        assert Path(workspace).is_dir()
+    finally:
+        owner.release(str(repo), workspace)
+
+
+def test_detached_workspace_is_preserved(tmp_path):
+    from pathlib import Path
+
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    owner = WorkspaceManager()
+    workspace = owner.prepare(str(repo), "owner")
+    subprocess.run(["git", "checkout", "--detach", "HEAD"], cwd=workspace,
+                   check=True, capture_output=True)
+    (Path(workspace) / "README.md").write_text("detached change", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-qm", "detached evidence"], cwd=workspace, check=True)
+    with pytest.raises(RuntimeError):
+        owner.release(str(repo), workspace)
+    assert (Path(workspace) / "README.md").read_text(encoding="utf-8") == "detached change"
+    assert (repo / ".git" / "multi-ia-writer.lock").exists()
