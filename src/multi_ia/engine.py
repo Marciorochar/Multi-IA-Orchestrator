@@ -303,7 +303,7 @@ class Orchestrator:
                 )
             except (ValueError, TypeError, RecursionError):
                 raise _PermissionDenied("invalid_operation") from None
-            if operation.action != "read" and self.store is None:
+            if operation.action in {"write_workspace", "delete"} and self.store is None:
                 raise _PermissionDenied("journal_required")
             denial = self.approval_gate.authorize(operation)
             if denial is not None:
