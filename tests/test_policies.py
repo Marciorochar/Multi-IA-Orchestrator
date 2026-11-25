@@ -90,13 +90,15 @@ def test_timeout_sets_failed_state():
     assert outcome.reason == "timeout"
 
 
-def test_dangerous_action_requires_approval():
-    gate = ApprovalGate(dangerous_actions={"publish"})
+def test_legacy_action_string_cannot_authorize_publication():
+    import pytest
 
+    gate = ApprovalGate()
     assert gate.check("read") is True
     assert gate.check("publish") is False
-    gate.approve("publish")
-    assert gate.check("publish") is True
+    with pytest.raises(ValueError):
+        gate.approve("publish", approved=True)
+    assert gate.check("publish") is False
 
 
 def test_stop_while_paused_cancels_without_resume():
@@ -269,3 +271,16 @@ def test_read_simulation_does_not_need_mutation_approval():
     calls, outcome = run_permission_case(operation_plan("read"))
     assert calls == ["planner", "executor", "auditor"]
     assert outcome.state is OrchestratorState.COMPLETED
+
+
+def test_consumed_operation_cannot_be_reapproved():
+    import pytest
+    from multi_ia.contracts import Operation
+
+    gate = ApprovalGate()
+    op = Operation.from_plan(operation_plan(), run_id="run-1", cycle_id=1)
+    gate.approve(op, approved=True)
+    assert gate.authorize(op) is None
+    with pytest.raises(ValueError):
+        gate.approve(op, approved=True)
+    assert gate.authorize(op) is not None
