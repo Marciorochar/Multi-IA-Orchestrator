@@ -145,14 +145,14 @@ def operation_plan(action="write_workspace", **overrides):
     return {"plan": "change A", "operation": declaration}
 
 
-def run_permission_case(plan, gate=None, execution_mode="fake"):
+def run_permission_case(plan, gate=None, execution_mode="fake", store=None):
     calls = []
-    kwargs = {"execution_mode": execution_mode}
+    kwargs = {"execution_mode": execution_mode, "store": store}
     if gate is not None:
         kwargs["approval_gate"] = gate
     engine = Orchestrator(
         StaticAdapter(ok(plan), calls, "planner"),
-        StaticAdapter(ok(), calls, "executor"),
+        StaticAdapter(ok({"write_status": "confirmed"}), calls, "executor"),
         StaticAdapter(ok({"approved": True}), calls, "auditor"),
         **kwargs,
     )
@@ -191,8 +191,9 @@ def test_engine_rejects_malformed_and_mismatched_declarations():
         assert outcome.state is OrchestratorState.FAILED
 
 
-def test_scoped_approval_is_single_use_and_bound_to_plan_content():
+def test_scoped_approval_is_single_use_and_bound_to_plan_content(tmp_path):
     from multi_ia.contracts import Operation
+    from multi_ia.store import RunStore
 
     gate = ApprovalGate()
     plan = operation_plan()
@@ -205,13 +206,21 @@ def test_scoped_approval_is_single_use_and_bound_to_plan_content():
     assert calls == ["planner"]
     assert outcome.state is OrchestratorState.FAILED
 
-    calls, outcome = run_permission_case(plan, gate)
-    assert calls == ["planner", "executor", "auditor"]
-    assert outcome.state is OrchestratorState.COMPLETED
+    store = RunStore(tmp_path / "approved.sqlite")
+    try:
+        calls, outcome = run_permission_case(plan, gate, store=store)
+        assert calls == ["planner", "executor", "auditor"]
+        assert outcome.state is OrchestratorState.COMPLETED
+    finally:
+        store.close()
 
-    calls, outcome = run_permission_case(plan, gate)
-    assert calls == ["planner"]
-    assert outcome.state is OrchestratorState.FAILED
+    other = RunStore(tmp_path / "replay.sqlite")
+    try:
+        calls, outcome = run_permission_case(plan, gate, store=other)
+        assert calls == ["planner"]
+        assert outcome.state is OrchestratorState.FAILED
+    finally:
+        other.close()
 
 
 def test_approval_is_not_transferable_to_another_operation_or_cycle():
@@ -299,8 +308,9 @@ def test_default_engine_cannot_dispatch_unknown_operation():
     assert outcome.reason == "permission_denied"
 
 
-def test_permission_check_uses_snapshot_of_dispatched_plan():
+def test_permission_check_uses_snapshot_of_dispatched_plan(tmp_path):
     from multi_ia.contracts import Operation
+    from multi_ia.store import RunStore
 
     plan = operation_plan()
     gate = ApprovalGate()
@@ -310,17 +320,21 @@ def test_permission_check_uses_snapshot_of_dispatched_plan():
     class ObservingExecutor:
         async def run(self, request):
             observed.append(request.payload["plan"])
-            return ok()
+            return ok({"write_status": "confirmed"})
 
     def observe(event):
         if event["type"] == "stage_started" and event.get("role") == "executor":
             plan["plan"] = "changed after approval"
 
-    engine = Orchestrator(
-        StaticAdapter(ok(plan)), ObservingExecutor(),
-        StaticAdapter(ok({"approved": True})),
-        approval_gate=gate, event_sink=observe,
-    )
-    outcome = asyncio.run(engine.run_cycle("run-1", 1))
-    assert outcome.state is OrchestratorState.COMPLETED
-    assert observed == ["change A"]
+    store = RunStore(tmp_path / "snapshot.sqlite")
+    try:
+        engine = Orchestrator(
+            StaticAdapter(ok(plan)), ObservingExecutor(),
+            StaticAdapter(ok({"approved": True})),
+            approval_gate=gate, event_sink=observe, store=store,
+        )
+        outcome = asyncio.run(engine.run_cycle("run-1", 1))
+        assert outcome.state is OrchestratorState.COMPLETED
+        assert observed == ["change A"]
+    finally:
+        store.close()

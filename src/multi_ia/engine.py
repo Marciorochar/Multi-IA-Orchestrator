@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from collections.abc import Callable
@@ -10,7 +11,7 @@ from typing import Any
 from multi_ia.adapters.base import AgentAdapter
 from multi_ia.contracts import AgentRequest, AgentResult, Operation, canonical_plan
 from multi_ia.policies import ApprovalGate, CancellationController, ExecutionPolicy, PauseController, ProgressGuard
-from multi_ia.store import RunStore
+from multi_ia.store import JournalBlocked, RunStore
 
 
 class OrchestratorState(str, Enum):
@@ -178,6 +179,10 @@ class Orchestrator:
             )
 
         try:
+            if self.store is not None:
+                reason = self.store.dispatch_block_reason(run_id, cycle_id)
+                if reason:
+                    raise JournalBlocked(reason)
             planner_result = await self._run_stage(
                 adapter=self.planner,
                 state=OrchestratorState.PLANNING,
@@ -219,6 +224,13 @@ class Orchestrator:
             failure = self._validate_stage_result(auditor_result, results, "auditor")
             if failure is not None:
                 return self._finish(run_id, cycle_id, failure)
+        except JournalBlocked as exc:
+            self.state = OrchestratorState.FAILED
+            # Never overwrite an existing run's authoritative checkpoint.
+            return CycleOutcome(state=self.state, results=results, reason=str(exc))
+        except sqlite3.Error:
+            self.state = OrchestratorState.FAILED
+            return CycleOutcome(state=self.state, results=results, reason="persistence_failure")
         except _StopRequested:
             self.state = OrchestratorState.CANCELLED
             return self._finish(
@@ -282,6 +294,7 @@ class Orchestrator:
             raise _StopRequested
         if self._stop_requested(request.run_id):
             raise _StopRequested
+        operation = None
         if request.role == "executor":
             try:
                 snapshot = json.loads(canonical_plan(request.payload))
@@ -290,6 +303,8 @@ class Orchestrator:
                 )
             except (ValueError, TypeError, RecursionError):
                 raise _PermissionDenied("invalid_operation") from None
+            if operation.action != "read" and self.store is None:
+                raise _PermissionDenied("journal_required")
             denial = self.approval_gate.authorize(operation)
             if denial is not None:
                 raise _PermissionDenied(denial)
@@ -307,6 +322,10 @@ class Orchestrator:
                 request.run_id,
                 {"cycle_id": request.cycle_id, "state": state.value, "role": request.role},
             )
+        if self._stop_requested(request.run_id):
+            raise _StopRequested
+        if operation is not None and self.store is not None:
+            self.store.begin_operation(operation)
         try:
             result = await asyncio.wait_for(
                 adapter.run(request),
@@ -326,6 +345,23 @@ class Orchestrator:
         )
         if self._stop_requested(request.run_id):
             raise _StopRequested
+        if operation is not None and self.store is not None:
+            if isinstance(result, AgentResult) and result.status == "completed":
+                try:
+                    AgentResult(
+                        status=result.status, payload=result.payload,
+                        evidence=result.evidence, protocol_version=result.protocol_version,
+                    )
+                except (ValueError, TypeError):
+                    raise _PermissionDenied("needs_reconciliation") from None
+                write_status = result.payload.get("write_status")
+                if result.protocol_version != "1.0" or not (
+                    write_status == "confirmed"
+                    or (operation.action == "read" and "write_status" not in result.payload)
+                ):
+                    raise _PermissionDenied("needs_reconciliation")
+                # Simulated completion only. Real mutation verification is not enabled.
+                self.store.confirm_operation(operation)
         return result
 
     def _emit(self, event_type: str, **payload: Any) -> None:
@@ -371,5 +407,11 @@ class Orchestrator:
             executor_result = outcome.results.get("executor")
             if executor_result is not None and "write_status" in executor_result.payload:
                 checkpoint["write_status"] = executor_result.payload["write_status"]
-            self.store.save_checkpoint(run_id, checkpoint)
+            try:
+                self.store.save_checkpoint(run_id, checkpoint)
+            except sqlite3.Error:
+                self.state = OrchestratorState.FAILED
+                return CycleOutcome(
+                    state=self.state, results=outcome.results, reason="persistence_failure"
+                )
         return outcome
