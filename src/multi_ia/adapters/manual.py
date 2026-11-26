@@ -8,6 +8,7 @@ import sys
 from collections.abc import Callable
 from typing import TextIO
 
+from multi_ia.console import discard_pending_input, interruptible
 from multi_ia.contracts import AgentRequest, AgentResult
 
 END = "FIM"
@@ -46,7 +47,11 @@ class _Terminal:
 
     def line(self) -> str | None:
         """One line, or None when input ends or is interrupted."""
-        line = self.stdin.readline()
+        try:
+            with interruptible():
+                line = self.stdin.readline()
+        except KeyboardInterrupt:
+            return None
         return None if line == "" else line.rstrip("\r\n")
 
     def block(self) -> str | None:
@@ -112,6 +117,8 @@ class ManualAuditor(_Terminal):
         self.say(printable(str(execution.get("report", ""))))
         self.say("=" * 40)
         while True:
+            # Nothing typed during the analysis may decide the audit.
+            discard_pending_input(self.stdin)
             self.say("Auditoria humana: aprovar este resultado? (s/n)")
             answer = self.line()
             if answer is None or answer.strip().upper() == CANCEL:

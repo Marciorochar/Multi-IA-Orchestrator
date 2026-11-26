@@ -7,15 +7,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from multi_ia.adapters.claude_code import ClaudeCodeExecutor, claude_command
 from multi_ia.adapters.manual import ManualAuditor, ManualPlanner
+from multi_ia.console import discard_pending_input, on_console_close, process_alive
 from multi_ia.engine import CycleOutcome, Orchestrator, OrchestratorState
 from multi_ia.policies import ExecutionPolicy
 
@@ -32,7 +39,10 @@ Digite "sim" para continuar:"""
 
 def snapshot_head(repo: str | Path, target: str | Path) -> None:
     """Extract the files committed in HEAD, without .git, into target."""
-    with tempfile.TemporaryDirectory(prefix="multi-ia-archive-") as scratch:
+    # The archive stays next to the target, inside the same disposable folder.
+    with tempfile.TemporaryDirectory(
+        prefix="multi-ia-archive-", dir=Path(target).parent
+    ) as scratch:
         archive = Path(scratch) / "head.tar"
         try:
             subprocess.run(
@@ -45,6 +55,46 @@ def snapshot_head(repo: str | Path, target: str | Path) -> None:
                 bundle.extractall(target, filter="data")
         except (OSError, subprocess.SubprocessError, tarfile.TarError):
             raise ValueError("repository_snapshot_failed") from None
+
+
+_SNAPSHOT_NAME = re.compile(r"multi-ia-snapshot-(\d+)-.+")
+
+
+def remove_stale_snapshots(root: str | Path | None = None) -> None:
+    """Remove copies left by runs whose process no longer exists."""
+    try:
+        entries = list(Path(root or tempfile.gettempdir()).iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        match = _SNAPSHOT_NAME.fullmatch(entry.name)
+        if (match and entry.is_dir() and not entry.is_symlink()
+                and not process_alive(int(match.group(1)))):
+            shutil.rmtree(entry, ignore_errors=True)
+
+
+@contextmanager
+def temporary_snapshot(root: str | Path | None = None) -> Iterator[Path]:
+    """A disposable folder for the project copy, named after this process."""
+    workspace = Path(tempfile.mkdtemp(
+        prefix=f"multi-ia-snapshot-{os.getpid()}-", dir=root
+    ))
+
+    def remove() -> None:
+        # A process that is still exiting can briefly hold the folder open.
+        for _ in range(5):
+            shutil.rmtree(workspace, ignore_errors=True)
+            if not workspace.exists():
+                return
+            time.sleep(0.2)
+
+    try:
+        with on_console_close(remove):
+            yield workspace
+    finally:
+        remove()
+        if workspace.exists():
+            print(f"Atenção: apague manualmente a cópia temporária: {workspace}", flush=True)
 
 
 def _report(state: str, reason: str | None, **extra) -> None:
@@ -76,6 +126,8 @@ def run_experimental(goal: str, repo: str, *, max_cycles: int, max_seconds: floa
         return 2
 
     print(WARNING, flush=True)
+    # Pasted or typed-ahead text must not give consent.
+    discard_pending_input()
     if sys.stdin.readline().strip().lower() != "sim":
         _report("cancelled", "consent_declined")
         return 2
@@ -85,9 +137,10 @@ def run_experimental(goal: str, repo: str, *, max_cycles: int, max_seconds: floa
         return 2
 
     try:
-        with tempfile.TemporaryDirectory(
-            prefix="multi-ia-snapshot-", ignore_cleanup_errors=True
-        ) as snapshot:
+        remove_stale_snapshots()
+        with temporary_snapshot() as workspace:
+            snapshot = workspace / "tree"
+            snapshot.mkdir()
             snapshot_head(repo, snapshot)
             engine = Orchestrator(
                 ManualPlanner(), ClaudeCodeExecutor(snapshot, command=command),

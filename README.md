@@ -156,9 +156,31 @@ Antes de começar, o comando exige que você digite `sim`. Considere:
 - variáveis de ambiente `CLAUDE*` e `ANTHROPIC*` não são repassadas: a CLI usa o login salvo;
 - `--max-seconds` (padrão 900) limita o tempo dos agentes; a espera pelas suas respostas não conta. `--max-cycles` tem padrão 3;
 - o uso consome cota ou gera custo, sem controle de orçamento pelo orquestrador;
-- nada é salvo: não há `status`, `stop` nem `resume`. Copie o que quiser guardar.
+- nada é salvo: não há `status`, `stop` nem `resume`. Copie o que quiser guardar;
+- a cópia temporária é removida ao terminar e ao fechar a janela do console no Windows. Se o processo for encerrado à força, a sobra (`multi-ia-snapshot-*` na pasta temporária) só é removida na próxima execução;
+- texto colado ou digitado antes da hora é descartado antes do `sim` e da sua auditoria;
+- para desistir, prefira `CANCELAR`; o Ctrl+C digitado no teclado ainda não foi verificado em console real.
 
 Este modo é uma dispensa, autorizada pelo usuário em 2026-11-25, do [gate adicional](docs/integrations/compatibility.md) **somente** para uso experimental, somente leitura, na máquina local. Não libera escrita, publicação ou produção.
+
+### Executável para Windows
+
+Gera um `.exe` que abre o modo experimental com um duplo clique, sem digitar o comando. Para gerar:
+
+```powershell
+python -m pip install -e ".[build]"
+```
+
+```powershell
+pwsh scripts/build_exe.ps1
+```
+
+O arquivo fica em `dist\multi-ia.exe` (não é versionado). Ao abrir, ele pede a pasta do projeto (um repositório Git com pelo menos um commit; é possível arrastar a pasta para a janela) e o objetivo em uma linha. Depois segue o fluxo e os avisos acima, com 3 ciclos e 900 s de tempo dos agentes. A janela só fecha após Enter; nada é salvo em arquivo. Digite `CANCELAR` para desistir.
+
+- Git e Claude Code, instalados e logados, continuam necessários; não vão dentro do executável.
+- O arquivo não é assinado: o Windows ou o antivírus podem alertar.
+- Ele é uma cópia do código no momento da geração. Depois de mudar o código, gere de novo.
+- Não inclui a interface gráfica nem os comandos `start`, `status`, `stop` e `resume`. O comando `multi-ia` instalado pelo Python é outro programa, apesar do mesmo nome.
 
 ### Banco e workspace compartilhados
 
