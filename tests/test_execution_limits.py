@@ -7,7 +7,7 @@ import pytest
 
 from multi_ia.contracts import AgentResult, Operation
 from multi_ia.engine import Orchestrator, OrchestratorState
-from multi_ia.policies import ApprovalGate, ExecutionPolicy, PauseController
+from multi_ia.policies import ApprovalGate, ExecutionPolicy
 from multi_ia.store import RunStore
 
 
@@ -81,23 +81,6 @@ def test_deadline_is_shared_by_stages(monkeypatch):
     result = asyncio.run(engine.run("r"))
     assert result.reason == "timeout"
     assert calls == ["planner", "executor"]
-
-
-def test_pause_consumes_total_deadline():
-    calls = []
-    pause = PauseController()
-    pause.request_pause()
-    engine = Orchestrator(
-        Adapter("planner", calls, done()),
-        Adapter("executor", calls, done()),
-        Adapter("auditor", calls, done({"approved": True})),
-        policy=ExecutionPolicy(1, .03, 0), pause=pause,
-    )
-    async def scenario():
-        return await asyncio.wait_for(engine.run("r"), timeout=1)
-    result = asyncio.run(scenario())
-    assert result.reason == "timeout"
-    assert calls == []
 
 
 def test_direct_cycle_cannot_bypass_cycle_limit():

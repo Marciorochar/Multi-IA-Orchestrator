@@ -128,6 +128,8 @@ python -m multi_ia.cli stop --run-id demo-1
 python -m multi_ia.cli resume --run-id demo-1 --goal "validar o fluxo" --repo .
 ```
 
+O comando `stop` só aceita uma execução já registrada no banco em uso. Para um `run-id` desconhecido, não grava nada, informa `run_not_found` e termina com código 1.
+
 O comando `resume` recusa automaticamente checkpoints incertos, legados sem evidência suficiente ou com workspace pendente. A confirmação de conclusão exige também um recibo de aprovação do auditor vinculado ao journal; checkpoints antigos sem recibo ficam disponíveis para consulta, mas não são considerados conclusão verificada. Somente a fronteira comprovada após confirmação do executor fake de diretório comum admite retomada de auditoria sem novo despacho.
 
 ### Banco e workspace compartilhados
@@ -178,7 +180,7 @@ A janela oferece:
 - logs em tempo real;
 - indicação explícita de **Modo simulado**.
 
-O botão **Pausar** é cooperativo: a pausa acontece em limites seguros entre etapas. **Parar** solicita cancelamento e impede novas etapas.
+O botão **Pausar** é cooperativo: a pausa acontece em limites seguros entre etapas. O tempo em que a execução fica efetivamente parada não conta no limite total de tempo; a etapa que ainda está em andamento continua contando. O cronômetro da janela mostra o tempo total, incluindo pausas. **Parar** solicita cancelamento e impede novas etapas.
 
 > A interface ainda não controla sessões reais de ChatGPT, Antigravity ou Codex. Isso será implementado somente após a Task 0 validar os mecanismos disponíveis.
 

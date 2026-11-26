@@ -17,6 +17,7 @@ def initial_limits(policy: ExecutionPolicy, *, known_zero: bool) -> dict:
         "started_at": now,
         "deadline": now + policy.max_seconds,
         "last_wall": now,
+        "paused_seconds": 0.0,
         "max_seconds": float(policy.max_seconds),
         "max_retries": policy.max_retries,
         "retries_used": 0,
@@ -26,6 +27,17 @@ def initial_limits(policy: ExecutionPolicy, *, known_zero: bool) -> dict:
         "spent": 0 if known_zero else None,
         "cost_source": KNOWN_COST if known_zero else UNKNOWN_COST,
     }
+
+
+def extend_deadline(record: dict, paused: float, now: float) -> None:
+    if now < record["last_wall"]:
+        raise ExecutionLimitError("clock_regression")
+    record["paused_seconds"] = record.get("paused_seconds", 0.0) + paused
+    # Same evaluation order as validation, so the floating-point result matches.
+    record["deadline"] = (
+        record["started_at"] + record["max_seconds"] + record["paused_seconds"]
+    )
+    record["last_wall"] = now
 
 
 class ExecutionLimits:
@@ -52,8 +64,12 @@ class ExecutionLimits:
         if not isinstance(r, dict):
             raise ExecutionLimitError("limits_evidence_missing")
         try:
+            # Records written before pause accounting have no paused time.
+            paused = r.get("paused_seconds", 0.0)
             if (
-                type(r["schema_version"]) is not int or r["schema_version"] != 1
+                type(paused) not in (int, float) or not math.isfinite(paused)
+                or paused < 0
+                or type(r["schema_version"]) is not int or r["schema_version"] != 1
                 or r["max_seconds"] != self.policy.max_seconds
                 or r["max_cycles"] != self.policy.max_cycles
                 or r["max_retries"] != self.policy.max_retries
@@ -65,7 +81,7 @@ class ExecutionLimits:
                 or not 0 <= r["retries_used"] <= self.policy.max_retries
                 or not all(type(r[key]) in (int, float) and math.isfinite(r[key])
                            for key in ("started_at", "deadline", "last_wall"))
-                or r["deadline"] != r["started_at"] + self.policy.max_seconds
+                or r["deadline"] != r["started_at"] + self.policy.max_seconds + paused
                 or r["last_wall"] < r["started_at"]
             ):
                 raise ExecutionLimitError("limits_evidence_invalid")
@@ -94,6 +110,26 @@ class ExecutionLimits:
         else:
             self.record["last_wall"] = now
         return self.remaining()
+
+    def begin_pause(self) -> float:
+        # An already expired limit cannot be revived by pausing.
+        self.checkpoint()
+        return time.monotonic()
+
+    def end_pause(self, started: float) -> None:
+        """Extend both deadlines by the time the engine was blocked in a pause.
+
+        Credit is recorded only after the pause ends, so a process that dies
+        while paused keeps the earlier deadline.
+        """
+        paused = max(0.0, time.monotonic() - started)
+        now = time.time()
+        if self.store is not None:
+            self.record = self.store.credit_pause(self.run_id, paused, now)
+        else:
+            extend_deadline(self.record, paused, now)
+        self.deadline += paused
+        self._validate()
 
     def reserve_retry(self) -> None:
         self.remaining()

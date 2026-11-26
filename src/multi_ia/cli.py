@@ -92,8 +92,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         with closing(RunStore(prepare_db_path(args.db))) as store:
             if args.command == "stop":
-                store.request_stop(args.run_id)
-                payload, code = {"run_id": args.run_id, "state": "stop_requested"}, 0
+                if store.load_checkpoint(args.run_id) is None:
+                    # Recording it would silently cancel a later run with this ID.
+                    payload, code = {
+                        "run_id": args.run_id, "state": "unknown",
+                        "reason": "run_not_found",
+                    }, 1
+                else:
+                    store.request_stop(args.run_id)
+                    payload, code = {"run_id": args.run_id, "state": "stop_requested"}, 0
             else:
                 checkpoint = store.load_checkpoint(args.run_id)
                 if checkpoint is None:

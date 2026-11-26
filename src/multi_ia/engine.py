@@ -38,6 +38,9 @@ class CycleOutcome:
     reason: str | None = None
 
 
+_PAUSED = object()  # A pause arrived after scheduling; the adapter was not called.
+
+
 class _StopRequested(Exception):
     pass
 
@@ -434,16 +437,7 @@ class Orchestrator:
         recovery_plan: AgentResult | None = None,
     ) -> Any:
         limits = self._limits_for(request.run_id)
-        if self._stop_requested(request.run_id):
-            raise _StopRequested
-        if not await asyncio.wait_for(
-            self.pause.wait_until_resumed(lambda: self._stop_requested(request.run_id)),
-            timeout=limits.checkpoint(),
-        ):
-            raise _StopRequested
-        if self._stop_requested(request.run_id):
-            raise _StopRequested
-        limits.checkpoint()
+        await self._wait_dispatch(request.run_id, limits)
         operation = None
         if request.role == "executor":
             try:
@@ -485,24 +479,25 @@ class Orchestrator:
 
             async def invoke():
                 # Check again after scheduling, immediately before invocation.
-                await self._wait_dispatch(request.run_id, limits)
+                # Never block on a pause here: this wait is under the time limit.
+                if self._stop_requested(request.run_id):
+                    raise _StopRequested
+                limits.checkpoint()
+                if self.pause.paused:
+                    return _PAUSED
                 return await adapter.run(request)
 
             try:
                 result = await asyncio.wait_for(invoke(), timeout=timeout)
+                if result is _PAUSED:
+                    continue
             except (_StopRequested, ExecutionLimitError, TimeoutError, sqlite3.Error):
                 raise
             except RetryableReadError:
                 # Never retry executor or audit dispatch, even for a transient error.
                 if request.role != "planner":
                     raise _AdapterFailure("adapter_exception") from None
-                if self._stop_requested(request.run_id):
-                    raise _StopRequested
-                if not await asyncio.wait_for(
-                    self.pause.wait_until_resumed(lambda: self._stop_requested(request.run_id)),
-                    timeout=limits.remaining(),
-                ):
-                    raise _StopRequested
+                await self._wait_dispatch(request.run_id, limits)
                 limits.reserve_retry()
                 if self.store is not None:
                     self.store.append_event(request.run_id, {
@@ -557,12 +552,15 @@ class Orchestrator:
     async def _wait_dispatch(self, run_id: str, limits: ExecutionLimits) -> None:
         if self._stop_requested(run_id):
             raise _StopRequested
-        if self.pause.paused:
-            if not await asyncio.wait_for(
-                self.pause.wait_until_resumed(lambda: self._stop_requested(run_id)),
-                timeout=limits.checkpoint(),
+        while self.pause.paused:
+            # Only time blocked here is excluded from the limit; a running
+            # stage keeps consuming it even after a pause is requested.
+            started = limits.begin_pause()
+            if not await self.pause.wait_until_resumed(
+                lambda: self._stop_requested(run_id)
             ):
                 raise _StopRequested
+            limits.end_pause(started)
         limits.checkpoint()
         if self._stop_requested(run_id):
             raise _StopRequested

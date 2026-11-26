@@ -1,6 +1,6 @@
 # Etapa 8.6 — Limites acumulados
 
-- O tempo máximo é por execução inteira, incluindo pausas, ciclos e tentativas, não por agente.
+- O tempo máximo é por execução inteira, incluindo ciclos e tentativas, não por agente. Atualização de 2026-11-25: o tempo em que o motor fica parado em uma pausa deixou de contar (antes contava). Uma etapa ainda em andamento após o pedido de pausa continua contando, e um prazo vencido não é recuperado pela pausa. O crédito é gravado somente ao fim da pausa, no campo paused_seconds, que estende o prazo; um processo encerrado durante a pausa mantém o prazo anterior. Registros sem esse campo continuam válidos.
 - O serviço persiste prazo de relógio civil, último horário observado e contadores no registro SQLite. A retomada mantém o prazo original; relógio regressivo detectado ou evidência ausente bloqueia despacho. O prazo ativo também usa relógio monotônico. Não é uma proteção contra manipulação deliberada do relógio.
 - max_retries é global e conta novas tentativas após a primeira. Somente o planejador pode ser repetido após RetryableReadError, um contrato do adaptador simulado para falhas transitórias sem efeitos. Timeout, exceção genérica, executor e auditor nunca são repetidos automaticamente.
 - Orçamento zero bloqueia novas etapas. Orçamento positivo exige custo conhecido: somente o perfil fake interno criado pelo ExecutionService é reconhecido como zero, em unidades simuladas. Adaptadores personalizados têm custo desconhecido e são bloqueados quando há orçamento finito. Não há medição de tokens nem custo real.
