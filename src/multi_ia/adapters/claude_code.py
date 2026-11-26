@@ -10,11 +10,10 @@ import hashlib
 import json
 import os
 import shutil
-import signal
-import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
+from multi_ia.adapters.process_tree import ProcessTree
 from multi_ia.contracts import AgentRequest, AgentResult
 
 READONLY_ARGS = (
@@ -46,19 +45,17 @@ def _environment() -> dict[str, str]:
     }
 
 
-def _kill_tree(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            capture_output=True, check=False, timeout=15,
+async def _drain(process: asyncio.subprocess.Process) -> None:
+    """Let the pipes close before the event loop does. Bounded, never raises."""
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                process.stdout.read(), process.stderr.read(), process.wait()
+            ),
+            timeout=10,
         )
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    except (OSError, RuntimeError, TimeoutError):
+        pass
 
 
 def _failed(code: str) -> AgentResult:
@@ -86,14 +83,15 @@ class ClaudeCodeExecutor:
             )
         except OSError:
             return _failed("claude_not_started")
+        tree = ProcessTree(process)
         try:
             # The prompt goes through stdin so no shell ever interprets it.
             output, _ = await process.communicate((_PROMPT + instructions).encode("utf-8"))
         finally:
-            # Covers cancellation and the engine's time limit.
-            if process.returncode is None:
-                _kill_tree(process)
-                await process.wait()
+            # Covers success, cancellation and the engine's time limit. A
+            # descendant can still be running after the CLI itself exited.
+            tree.kill()
+            await _drain(process)
         if process.returncode != 0:
             return _failed(f"claude_exit_{process.returncode}")
         return self._parse(output)

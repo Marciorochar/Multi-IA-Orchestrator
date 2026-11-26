@@ -8,6 +8,7 @@ from pathlib import Path
 # Absolute imports only: the packaged executable runs this file as a script.
 from multi_ia.console import discard_pending_input
 from multi_ia.experimental import run_experimental
+from multi_ia.workspace import git_environment
 
 MAX_CYCLES = 3
 MAX_SECONDS = 900
@@ -37,7 +38,7 @@ def _repository_problem(answer: str) -> str | None:
     try:
         check = subprocess.run(
             ["git", "rev-parse", "--verify", "HEAD"],
-            cwd=answer, capture_output=True, timeout=60,
+            cwd=answer, env=git_environment(), capture_output=True, timeout=60,
         )
     except FileNotFoundError:
         _say("Git não encontrado. Instale o Git e abra o programa novamente.")
@@ -49,7 +50,7 @@ def _repository_problem(answer: str) -> str | None:
     try:
         committed = subprocess.run(
             ["git", "ls-tree", "-r", "--name-only", "HEAD", "--", "."],
-            cwd=answer, capture_output=True, timeout=60,
+            cwd=answer, env=git_environment(), capture_output=True, timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
         return "Não foi possível consultar o Git nesta pasta."

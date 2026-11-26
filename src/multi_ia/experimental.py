@@ -25,6 +25,7 @@ from multi_ia.adapters.manual import ManualAuditor, ManualPlanner
 from multi_ia.console import discard_pending_input, on_console_close, process_alive
 from multi_ia.engine import CycleOutcome, Orchestrator, OrchestratorState
 from multi_ia.policies import ExecutionPolicy
+from multi_ia.workspace import git_environment
 
 WARNING = """MODO EXPERIMENTAL SOMENTE LEITURA
 - O Claude Code lerá uma cópia temporária dos arquivos do último commit (HEAD).
@@ -47,7 +48,7 @@ def snapshot_head(repo: str | Path, target: str | Path) -> None:
         try:
             subprocess.run(
                 ["git", "archive", "--format=tar", f"--output={archive}", "HEAD"],
-                cwd=Path(repo).resolve(strict=True),
+                cwd=Path(repo).resolve(strict=True), env=git_environment(),
                 check=True, capture_output=True, timeout=120,
             )
             with tarfile.open(archive) as bundle:
