@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from multi_ia.adapters.base import AgentAdapter
-from multi_ia.contracts import AgentRequest, AgentResult, Operation, VALID_STATUSES, audit_decision, canonical_plan, snapshot_result
+from multi_ia.contracts import AgentRequest, AgentResult, Operation, VALID_STATUSES, audit_decision, canonical_plan, cycle_feedback, snapshot_result
 from multi_ia.policies import ApprovalGate, CancellationController, ExecutionLimitError, ExecutionPolicy, PauseController, ProgressGuard, RetryableReadError
 from multi_ia.limits import ExecutionLimits
 from multi_ia.store import JournalBlocked, RunStore
@@ -114,13 +114,14 @@ class Orchestrator:
         except _ObserverFailure:
             return self._observer_abort(run_id, 1)
         last_outcome: CycleOutcome | None = None
+        feedback: dict[str, Any] | None = None
 
         for cycle_id in range(1, self.policy.max_cycles + 1):
             try:
                 self._emit("cycle_started", run_id=run_id, cycle_id=cycle_id)
             except _ObserverFailure:
                 return self._observer_abort(run_id, cycle_id)
-            outcome = await self.run_cycle(run_id, cycle_id)
+            outcome = await self.run_cycle(run_id, cycle_id, previous_cycle=feedback)
             last_outcome = outcome
             if outcome.state in {
                 OrchestratorState.COMPLETED,
@@ -179,6 +180,9 @@ class Orchestrator:
             if not outcome.next_cycle:
                 return outcome
             previous = current
+            feedback = cycle_feedback(
+                cycle_id, outcome.results["executor"], outcome.results["auditor"]
+            )
 
         self.state = OrchestratorState.PAUSED
         paused = self._finish(
@@ -199,8 +203,14 @@ class Orchestrator:
         )
         return paused
 
-    async def run_cycle(self, run_id: str, cycle_id: int) -> CycleOutcome:
+    async def run_cycle(
+        self, run_id: str, cycle_id: int, *,
+        previous_cycle: dict[str, Any] | None = None,
+    ) -> CycleOutcome:
         results: dict[str, AgentResult] = {}
+        planner_payload = self.initial_payload
+        if previous_cycle is not None:
+            planner_payload = {**self.initial_payload, "previous_cycle": previous_cycle}
 
         if self.execution_mode != "fake":
             self.state = OrchestratorState.FAILED
@@ -224,7 +234,7 @@ class Orchestrator:
                     run_id=run_id,
                     cycle_id=cycle_id,
                     role="planner",
-                    payload=self.initial_payload,
+                    payload=planner_payload,
                 ),
             )
             failure = self._validate_stage_result(planner_result, results, "planner")

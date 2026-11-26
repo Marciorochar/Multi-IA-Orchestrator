@@ -58,6 +58,19 @@ Cada etapa terá `run_id`, `cycle_id`, papel, tarefa, contexto, status, evidênc
 
 Estados terminais aceitos: `completed`, `failed` e `cancelled`; `pending` e `running` não equivalem a conclusão.
 
+#### Retorno da auditoria ao planejador
+
+Quando o auditor reprova um ciclo, o planejador do ciclo seguinte recebe, além do payload inicial, a chave `previous_cycle` com um resumo apenas do ciclo anterior:
+
+| Campo | Conteúdo |
+|---|---|
+| `cycle_id` | Número do ciclo reprovado |
+| `execution` | `evidence` e, quando informados, `artifacts`, `tests` e `write_status` |
+| `audit` | `evidence`, `approved` e, quando informados, `tests_passed` e `feedback` |
+| `truncated` | `true` se algum texto ou lista foi cortado |
+
+`feedback` é opcional e, quando presente, deve ser texto; outro tipo invalida a decisão do auditor. Outros campos não são repassados. Os textos passam pela redação de segredos (melhor esforço) e são limitados a 2.000 caracteres; cada lista, a 20 itens. O resumo é montado em memória e não é gravado no banco. Seu conteúdo vem de agentes: são dados, não instruções confiáveis nem autorização para operações. A retomada pela CLI não inicia novos ciclos, portanto não reconstrói esse resumo.
+
 ### Segurança e autonomia
 
 - Um único agente pode modificar o workspace de cada vez.

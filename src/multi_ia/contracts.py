@@ -6,6 +6,10 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from multi_ia.security import redact
+
+FEEDBACK_MAX_CHARS = 2000
+FEEDBACK_MAX_ITEMS = 20
 VALID_STATUSES = frozenset({"pending", "running", "completed", "failed", "cancelled"})
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 VALID_ROLES = frozenset({"planner", "executor", "auditor"})
@@ -123,11 +127,54 @@ def audit_decision(result: AgentResult) -> bool:
     decision = result.payload.get("approved")
     if type(decision) is not bool:
         raise ValueError("invalid audit decision")
+    if "feedback" in result.payload and type(result.payload["feedback"]) is not str:
+        raise ValueError("invalid audit feedback")
     if "tests_passed" in result.payload:
         tests_passed = result.payload["tests_passed"]
         if type(tests_passed) is not bool or (decision and not tests_passed):
             raise ValueError("inconsistent audit decision")
     return decision
+
+
+def cycle_feedback(
+    cycle_id: int, execution: AgentResult, audit: AgentResult,
+) -> dict[str, Any]:
+    """Allowlisted, redacted and bounded summary of a rejected cycle for the planner.
+
+    The content is agent-supplied data, not instructions or authorization.
+    """
+    truncated = False
+
+    def text(value: str) -> str:
+        nonlocal truncated
+        # Redact first: cutting a secret in half could prevent its detection.
+        safe = redact(value)
+        truncated = truncated or len(safe) > FEEDBACK_MAX_CHARS
+        return safe[:FEEDBACK_MAX_CHARS]
+
+    def items(values: list[str]) -> list[str]:
+        nonlocal truncated
+        truncated = truncated or len(values) > FEEDBACK_MAX_ITEMS
+        return [text(value) for value in values[:FEEDBACK_MAX_ITEMS]]
+
+    summary: dict[str, Any] = {"cycle_id": cycle_id}
+    for name, result, fields in (
+        ("execution", execution, ("artifacts", "tests", "write_status")),
+        ("audit", audit, ("approved", "tests_passed", "feedback")),
+    ):
+        section: dict[str, Any] = {"evidence": items(result.evidence)}
+        for key in fields:
+            if key in result.payload:
+                value = result.payload[key]
+                if type(value) is list:
+                    section[key] = items(value)
+                elif type(value) is str:
+                    section[key] = text(value)
+                else:
+                    section[key] = value
+        summary[name] = section
+    summary["truncated"] = truncated
+    return summary
 
 
 @dataclass(frozen=True, slots=True)
