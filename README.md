@@ -132,6 +132,34 @@ O comando `stop` só aceita uma execução já registrada no banco em uso. Para 
 
 O comando `resume` recusa automaticamente checkpoints incertos, legados sem evidência suficiente ou com workspace pendente. A confirmação de conclusão exige também um recibo de aprovação do auditor vinculado ao journal; checkpoints antigos sem recibo ficam disponíveis para consulta, mas não são considerados conclusão verificada. Somente a fronteira comprovada após confirmação do executor fake de diretório comum admite retomada de auditoria sem novo despacho.
 
+## Modo experimental somente leitura (ferramentas reais)
+
+Funciona apenas pelo terminal. A interface gráfica continua simulada.
+
+```powershell
+multi-ia experimental --goal "revisar o projeto e apontar erros" --repo C:\caminho\do\projeto
+```
+
+| Papel | Como funciona nesta versão |
+|---|---|
+| Planejador | Ponte manual: o pedido é mostrado (e copiado no Windows); você cola no ChatGPT e traz a resposta, terminando com uma linha `FIM`. Nenhum site ou aplicativo é automatizado. |
+| Executor | Claude Code CLI, com `--restricted`, somente `Read,Glob,Grep`, sem personalizações nem MCP. |
+| Auditor | **Você.** `s` aprova; `n` pede um comentário, que volta ao planejador no ciclo seguinte. O Codex ainda não foi validado. |
+
+Digite `CANCELAR` no lugar de uma resposta para desistir.
+
+Antes de começar, o comando exige que você digite `sim`. Considere:
+
+- o Claude Code lê uma cópia temporária dos arquivos do último commit (`git archive HEAD`). Arquivos não versionados e alterações sem commit ficam de fora, mas **segredos presentes no commit podem ser enviados à Anthropic**. O que você colar no ChatGPT vai para a OpenAI. O caminho local do projeto não é incluído no pedido ao planejador;
+- use somente repositórios confiáveis: o Git pode aplicar filtros configurados ao gerar a cópia, e atributos como `export-ignore` podem omitir arquivos dela;
+- a restrição foi testada na versão 2.1.319 do Claude Code. Não é um sandbox do sistema; repita o teste após atualizar a CLI;
+- variáveis de ambiente `CLAUDE*` e `ANTHROPIC*` não são repassadas: a CLI usa o login salvo;
+- `--max-seconds` (padrão 900) limita o tempo dos agentes; a espera pelas suas respostas não conta. `--max-cycles` tem padrão 3;
+- o uso consome cota ou gera custo, sem controle de orçamento pelo orquestrador;
+- nada é salvo: não há `status`, `stop` nem `resume`. Copie o que quiser guardar.
+
+Este modo é uma dispensa, autorizada pelo usuário em 2026-11-25, do [gate adicional](docs/integrations/compatibility.md) **somente** para uso experimental, somente leitura, na máquina local. Não libera escrita, publicação ou produção.
+
 ### Banco e workspace compartilhados
 
 GUI e CLI usam o mesmo `ExecutionService` e o banco padrão `~/.multi-ia-orchestrator/runs.sqlite`. Configure `MULTI_IA_DB_PATH` para outro local; na CLI, `--db` prevalece. Bancos anteriores não são removidos nem migrados automaticamente. Para consultar um banco CLI antigo, use `--db ./multi_ia.sqlite`.
@@ -140,7 +168,7 @@ Ao selecionar um projeto Git local confiável, o serviço cria um worktree de HE
 
 O modo real continua desativado; nenhum grant de escrita é criado automaticamente. O botão Retomar da GUI continua sendo a retomada de pausa da sessão ativa; recuperação de processo interrompido permanece acessível via CLI. O worktree não é sandbox nem autorização para escrita real.
 
-**Estado atual:** Tasks 1–5, CLI fake da Task 7 e interface PySide6 estão disponíveis na `main`. Nenhuma integração real com ChatGPT, Antigravity ou Codex foi alegada ou testada.
+**Estado atual:** Tasks 1–5, CLI fake da Task 7 e interface PySide6 estão disponíveis na `main`. O único uso de ferramenta real é o modo experimental somente leitura descrito acima; não há integração automática com ChatGPT nem com Codex.
 
 
 ## Interface desktop PySide6

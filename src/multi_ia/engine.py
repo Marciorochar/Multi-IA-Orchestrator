@@ -215,12 +215,17 @@ class Orchestrator:
         if previous_cycle is not None:
             planner_payload = {**self.initial_payload, "previous_cycle": previous_cycle}
 
-        if self.execution_mode != "fake":
+        if self.execution_mode not in {"fake", "readonly"}:
             self.state = OrchestratorState.FAILED
             return self._finish(
                 run_id, cycle_id,
                 CycleOutcome(state=self.state, reason="real_mode_disabled"),
             )
+        if self.execution_mode == "readonly" and self.store is not None:
+            # The journal and recovery evidence only describe simulated runs.
+            # Return before _finish so nothing is written to the store.
+            self.state = OrchestratorState.FAILED
+            return CycleOutcome(self.state, reason="readonly_persistence_unsupported")
 
         try:
             if not self.policy.allows_cycle(cycle_id):
@@ -447,6 +452,8 @@ class Orchestrator:
                 )
             except (ValueError, TypeError, RecursionError):
                 raise _PermissionDenied("invalid_operation") from None
+            if self.execution_mode == "readonly" and operation.action != "read":
+                raise _PermissionDenied("readonly_mode")
             if operation.action in {"write_workspace", "delete"} and self.store is None:
                 raise _PermissionDenied("journal_required")
             denial = self.approval_gate.authorize(operation)
@@ -473,6 +480,11 @@ class Orchestrator:
         await self._wait_dispatch(request.run_id, limits)
         if operation is not None and self.store is not None:
             self.store.begin_operation(operation)
+        # Only the experimental mode has people acting as agents.
+        waits_for_human = (
+            self.execution_mode == "readonly"
+            and getattr(adapter, "waits_for_human", False) is True
+        )
         while True:
             await self._wait_dispatch(request.run_id, limits)
             timeout = limits.checkpoint()
@@ -488,7 +500,13 @@ class Orchestrator:
                 return await adapter.run(request)
 
             try:
-                result = await asyncio.wait_for(invoke(), timeout=timeout)
+                if waits_for_human:
+                    # A person's reply time does not consume the agents' limit.
+                    started = limits.begin_pause()
+                    result = await invoke()
+                    limits.end_pause(started)
+                else:
+                    result = await asyncio.wait_for(invoke(), timeout=timeout)
                 if result is _PAUSED:
                     continue
             except (_StopRequested, ExecutionLimitError, TimeoutError, sqlite3.Error):
@@ -536,6 +554,8 @@ class Orchestrator:
         limits.checkpoint()
         if operation is not None and type(result) is AgentResult and result.status == "completed":
             write_status = result.payload.get("write_status")
+            if self.execution_mode == "readonly" and "write_status" in result.payload:
+                raise _ResultInvalid("invalid_result")
             if not (
                 write_status == "confirmed"
                 or (operation.action == "read" and "write_status" not in result.payload)
