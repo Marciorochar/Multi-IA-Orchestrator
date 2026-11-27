@@ -27,6 +27,15 @@ class RunStore:
             self._conn.close()
             raise
 
+    @property
+    def durable(self) -> bool:
+        """Whether SQLite keeps this database in a file after it is closed."""
+        # In-memory and temporary databases report an empty file name.
+        return any(
+            row[1] == "main" and bool(row[2])
+            for row in self._conn.execute("PRAGMA database_list")
+        )
+
     def _initialize(self) -> None:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
