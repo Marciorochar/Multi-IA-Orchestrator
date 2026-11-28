@@ -35,6 +35,20 @@ class _Lease:
         }
 
 
+def git_environment() -> dict[str, str]:
+    """The environment without overrides that select another repository."""
+    # An inherited repository override must not redirect commands to another
+    # repository when the selected path is used as the working directory.
+    return {
+        key: value for key, value in os.environ.items()
+        if key.upper() not in {
+            "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_NAMESPACE", "GIT_PREFIX",
+        }
+    }
+
+
 class WorkspaceManager:
     """Cooperative writer exclusion for worktrees of a single Git repository.
 
@@ -52,20 +66,10 @@ class WorkspaceManager:
 
     @staticmethod
     def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-        # An inherited repository override must not redirect commands to another
-        # repository when the selected path is used as the working directory.
-        env = {
-            key: value for key, value in os.environ.items()
-            if key.upper() not in {
-                "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                "GIT_NAMESPACE", "GIT_PREFIX",
-            }
-        }
         return subprocess.run(
             ["git", *args],
             cwd=repo,
-            env=env,
+            env=git_environment(),
             check=check,
             capture_output=True,
             text=True,

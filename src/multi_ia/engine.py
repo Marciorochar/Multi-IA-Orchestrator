@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from multi_ia.adapters.base import AgentAdapter
-from multi_ia.contracts import AgentRequest, AgentResult, Operation, VALID_STATUSES, audit_decision, canonical_plan, snapshot_result
+from multi_ia.contracts import AgentRequest, AgentResult, Operation, VALID_STATUSES, audit_decision, canonical_plan, cycle_feedback, snapshot_result
 from multi_ia.policies import ApprovalGate, CancellationController, ExecutionLimitError, ExecutionPolicy, PauseController, ProgressGuard, RetryableReadError
 from multi_ia.limits import ExecutionLimits
 from multi_ia.store import JournalBlocked, RunStore
@@ -36,6 +36,9 @@ class CycleOutcome:
     next_cycle: bool = False
     results: dict[str, AgentResult] = field(default_factory=dict)
     reason: str | None = None
+
+
+_PAUSED = object()  # A pause arrived after scheduling; the adapter was not called.
 
 
 class _StopRequested(Exception):
@@ -114,13 +117,14 @@ class Orchestrator:
         except _ObserverFailure:
             return self._observer_abort(run_id, 1)
         last_outcome: CycleOutcome | None = None
+        feedback: dict[str, Any] | None = None
 
         for cycle_id in range(1, self.policy.max_cycles + 1):
             try:
                 self._emit("cycle_started", run_id=run_id, cycle_id=cycle_id)
             except _ObserverFailure:
                 return self._observer_abort(run_id, cycle_id)
-            outcome = await self.run_cycle(run_id, cycle_id)
+            outcome = await self.run_cycle(run_id, cycle_id, previous_cycle=feedback)
             last_outcome = outcome
             if outcome.state in {
                 OrchestratorState.COMPLETED,
@@ -179,6 +183,9 @@ class Orchestrator:
             if not outcome.next_cycle:
                 return outcome
             previous = current
+            feedback = cycle_feedback(
+                cycle_id, outcome.results["executor"], outcome.results["auditor"]
+            )
 
         self.state = OrchestratorState.PAUSED
         paused = self._finish(
@@ -199,15 +206,26 @@ class Orchestrator:
         )
         return paused
 
-    async def run_cycle(self, run_id: str, cycle_id: int) -> CycleOutcome:
+    async def run_cycle(
+        self, run_id: str, cycle_id: int, *,
+        previous_cycle: dict[str, Any] | None = None,
+    ) -> CycleOutcome:
         results: dict[str, AgentResult] = {}
+        planner_payload = self.initial_payload
+        if previous_cycle is not None:
+            planner_payload = {**self.initial_payload, "previous_cycle": previous_cycle}
 
-        if self.execution_mode != "fake":
+        if self.execution_mode not in {"fake", "readonly"}:
             self.state = OrchestratorState.FAILED
             return self._finish(
                 run_id, cycle_id,
                 CycleOutcome(state=self.state, reason="real_mode_disabled"),
             )
+        if self.execution_mode == "readonly" and self.store is not None:
+            # The journal and recovery evidence only describe simulated runs.
+            # Return before _finish so nothing is written to the store.
+            self.state = OrchestratorState.FAILED
+            return CycleOutcome(self.state, reason="readonly_persistence_unsupported")
 
         try:
             if not self.policy.allows_cycle(cycle_id):
@@ -224,7 +242,7 @@ class Orchestrator:
                     run_id=run_id,
                     cycle_id=cycle_id,
                     role="planner",
-                    payload=self.initial_payload,
+                    payload=planner_payload,
                 ),
             )
             failure = self._validate_stage_result(planner_result, results, "planner")
@@ -424,16 +442,7 @@ class Orchestrator:
         recovery_plan: AgentResult | None = None,
     ) -> Any:
         limits = self._limits_for(request.run_id)
-        if self._stop_requested(request.run_id):
-            raise _StopRequested
-        if not await asyncio.wait_for(
-            self.pause.wait_until_resumed(lambda: self._stop_requested(request.run_id)),
-            timeout=limits.checkpoint(),
-        ):
-            raise _StopRequested
-        if self._stop_requested(request.run_id):
-            raise _StopRequested
-        limits.checkpoint()
+        await self._wait_dispatch(request.run_id, limits)
         operation = None
         if request.role == "executor":
             try:
@@ -443,6 +452,8 @@ class Orchestrator:
                 )
             except (ValueError, TypeError, RecursionError):
                 raise _PermissionDenied("invalid_operation") from None
+            if self.execution_mode == "readonly" and operation.action != "read":
+                raise _PermissionDenied("readonly_mode")
             # A journal that dies with the process cannot block a replay.
             if operation.action in {"write_workspace", "delete"} and (
                 self.store is None or not self.store.durable
@@ -472,30 +483,42 @@ class Orchestrator:
         await self._wait_dispatch(request.run_id, limits)
         if operation is not None and self.store is not None:
             self.store.begin_operation(operation)
+        # Only the experimental mode has people acting as agents.
+        waits_for_human = (
+            self.execution_mode == "readonly"
+            and getattr(adapter, "waits_for_human", False) is True
+        )
         while True:
             await self._wait_dispatch(request.run_id, limits)
             timeout = limits.checkpoint()
 
             async def invoke():
                 # Check again after scheduling, immediately before invocation.
-                await self._wait_dispatch(request.run_id, limits)
+                # Never block on a pause here: this wait is under the time limit.
+                if self._stop_requested(request.run_id):
+                    raise _StopRequested
+                limits.checkpoint()
+                if self.pause.paused:
+                    return _PAUSED
                 return await adapter.run(request)
 
             try:
-                result = await asyncio.wait_for(invoke(), timeout=timeout)
+                if waits_for_human:
+                    # A person's reply time does not consume the agents' limit.
+                    started = limits.begin_pause()
+                    result = await invoke()
+                    limits.end_pause(started)
+                else:
+                    result = await asyncio.wait_for(invoke(), timeout=timeout)
+                if result is _PAUSED:
+                    continue
             except (_StopRequested, ExecutionLimitError, TimeoutError, sqlite3.Error):
                 raise
             except RetryableReadError:
                 # Never retry executor or audit dispatch, even for a transient error.
                 if request.role != "planner":
                     raise _AdapterFailure("adapter_exception") from None
-                if self._stop_requested(request.run_id):
-                    raise _StopRequested
-                if not await asyncio.wait_for(
-                    self.pause.wait_until_resumed(lambda: self._stop_requested(request.run_id)),
-                    timeout=limits.remaining(),
-                ):
-                    raise _StopRequested
+                await self._wait_dispatch(request.run_id, limits)
                 limits.reserve_retry()
                 if self.store is not None:
                     self.store.append_event(request.run_id, {
@@ -534,6 +557,8 @@ class Orchestrator:
         limits.checkpoint()
         if operation is not None and type(result) is AgentResult and result.status == "completed":
             write_status = result.payload.get("write_status")
+            if self.execution_mode == "readonly" and "write_status" in result.payload:
+                raise _ResultInvalid("invalid_result")
             if not (
                 write_status == "confirmed"
                 or (operation.action == "read" and "write_status" not in result.payload)
@@ -550,12 +575,15 @@ class Orchestrator:
     async def _wait_dispatch(self, run_id: str, limits: ExecutionLimits) -> None:
         if self._stop_requested(run_id):
             raise _StopRequested
-        if self.pause.paused:
-            if not await asyncio.wait_for(
-                self.pause.wait_until_resumed(lambda: self._stop_requested(run_id)),
-                timeout=limits.checkpoint(),
+        while self.pause.paused:
+            # Only time blocked here is excluded from the limit; a running
+            # stage keeps consuming it even after a pause is requested.
+            started = limits.begin_pause()
+            if not await self.pause.wait_until_resumed(
+                lambda: self._stop_requested(run_id)
             ):
                 raise _StopRequested
+            limits.end_pause(started)
         limits.checkpoint()
         if self._stop_requested(run_id):
             raise _StopRequested

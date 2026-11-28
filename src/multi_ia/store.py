@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from multi_ia.contracts import AgentResult, Operation, audit_decision, canonical_plan, snapshot_result
+from multi_ia.limits import extend_deadline
 from multi_ia.policies import ExecutionLimitError
 
 
@@ -229,6 +230,19 @@ class RunStore:
                     raise ExecutionLimitError("retry_exhausted")
                 record["retries_used"] += 1
             record["last_wall"] = now
+            self._conn.execute(
+                "UPDATE execution_limits SET limits_json = ? WHERE run_id = ?",
+                (json.dumps(record, sort_keys=True, allow_nan=False), run_id),
+            )
+        return record
+
+    def credit_pause(self, run_id: str, paused: float, now: float) -> dict:
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            record = self.load_limits(run_id)
+            if record is None:
+                raise ExecutionLimitError("limits_evidence_missing")
+            extend_deadline(record, paused, now)
             self._conn.execute(
                 "UPDATE execution_limits SET limits_json = ? WHERE run_id = ?",
                 (json.dumps(record, sort_keys=True, allow_nan=False), run_id),

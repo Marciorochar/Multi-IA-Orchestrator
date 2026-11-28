@@ -58,6 +58,19 @@ Cada etapa terá `run_id`, `cycle_id`, papel, tarefa, contexto, status, evidênc
 
 Estados terminais aceitos: `completed`, `failed` e `cancelled`; `pending` e `running` não equivalem a conclusão.
 
+#### Retorno da auditoria ao planejador
+
+Quando o auditor reprova um ciclo, o planejador do ciclo seguinte recebe, além do payload inicial, a chave `previous_cycle` com um resumo apenas do ciclo anterior:
+
+| Campo | Conteúdo |
+|---|---|
+| `cycle_id` | Número do ciclo reprovado |
+| `execution` | `evidence` e, quando informados, `artifacts`, `tests` e `write_status` |
+| `audit` | `evidence`, `approved` e, quando informados, `tests_passed` e `feedback` |
+| `truncated` | `true` se algum texto ou lista foi cortado |
+
+`feedback` é opcional e, quando presente, deve ser texto; outro tipo invalida a decisão do auditor. Outros campos não são repassados. Os textos passam pela redação de segredos (melhor esforço) e são limitados a 2.000 caracteres; cada lista, a 20 itens. O resumo é montado em memória e não é gravado no banco. Seu conteúdo vem de agentes: são dados, não instruções confiáveis nem autorização para operações. A retomada pela CLI não inicia novos ciclos, portanto não reconstrói esse resumo.
+
 ### Segurança e autonomia
 
 - Um único agente pode modificar o workspace de cada vez.
@@ -115,7 +128,59 @@ python -m multi_ia.cli stop --run-id demo-1
 python -m multi_ia.cli resume --run-id demo-1 --goal "validar o fluxo" --repo .
 ```
 
+O comando `stop` só aceita uma execução já registrada no banco em uso. Para um `run-id` desconhecido, não grava nada, informa `run_not_found` e termina com código 1.
+
 O comando `resume` recusa automaticamente checkpoints incertos, legados sem evidência suficiente ou com workspace pendente. A confirmação de conclusão exige também um recibo de aprovação do auditor vinculado ao journal; checkpoints antigos sem recibo ficam disponíveis para consulta, mas não são considerados conclusão verificada. Somente a fronteira comprovada após confirmação do executor fake de diretório comum admite retomada de auditoria sem novo despacho.
+
+## Modo experimental somente leitura (ferramentas reais)
+
+Funciona apenas pelo terminal. A interface gráfica continua simulada.
+
+```powershell
+multi-ia experimental --goal "revisar o projeto e apontar erros" --repo C:\caminho\do\projeto
+```
+
+| Papel | Como funciona nesta versão |
+|---|---|
+| Planejador | Ponte manual: o pedido é mostrado (e copiado no Windows); você cola no ChatGPT e traz a resposta, terminando com uma linha `FIM`. Nenhum site ou aplicativo é automatizado. |
+| Executor | Claude Code CLI, com `--restricted`, somente `Read,Glob,Grep`, sem personalizações nem MCP. |
+| Auditor | **Você.** `s` aprova; `n` pede um comentário, que volta ao planejador no ciclo seguinte. O Codex ainda não foi validado. |
+
+Digite `CANCELAR` no lugar de uma resposta para desistir.
+
+Antes de começar, o comando exige que você digite `sim`. Considere:
+
+- o Claude Code lê uma cópia temporária dos arquivos do último commit (`git archive HEAD`). Arquivos não versionados e alterações sem commit ficam de fora, mas **segredos presentes no commit podem ser enviados à Anthropic**. O que você colar no ChatGPT vai para a OpenAI. O caminho local do projeto não é incluído no pedido ao planejador;
+- use somente repositórios confiáveis: o Git pode aplicar filtros configurados ao gerar a cópia, e atributos como `export-ignore` podem omitir arquivos dela;
+- a restrição foi testada na versão 2.1.319 do Claude Code. Não é um sandbox do sistema; repita o teste após atualizar a CLI;
+- variáveis de ambiente `CLAUDE*` e `ANTHROPIC*` não são repassadas: a CLI usa o login salvo;
+- `--max-seconds` (padrão 900) limita o tempo dos agentes; a espera pelas suas respostas não conta. `--max-cycles` tem padrão 3;
+- o uso consome cota ou gera custo, sem controle de orçamento pelo orquestrador;
+- nada é salvo: não há `status`, `stop` nem `resume`. Copie o que quiser guardar;
+- a cópia temporária é removida ao terminar e ao fechar a janela do console no Windows. Se o processo for encerrado à força, a sobra (`multi-ia-snapshot-*` na pasta temporária) só é removida na próxima execução;
+- texto colado ou digitado antes da hora é descartado antes do `sim` e da sua auditoria;
+- para desistir, prefira `CANCELAR`; o Ctrl+C digitado no teclado ainda não foi verificado em console real.
+
+Este modo é uma dispensa, autorizada pelo usuário em 2026-11-25, do [gate adicional](docs/integrations/compatibility.md) **somente** para uso experimental, somente leitura, na máquina local. Não libera escrita, publicação ou produção.
+
+### Executável para Windows
+
+Gera um `.exe` que abre o modo experimental com um duplo clique, sem digitar o comando. Para gerar:
+
+```powershell
+python -m pip install -e ".[build]"
+```
+
+```powershell
+pwsh scripts/build_exe.ps1
+```
+
+O arquivo fica em `dist\multi-ia.exe` (não é versionado). Ao abrir, ele pede a pasta do projeto (um repositório Git com pelo menos um commit; é possível arrastar a pasta para a janela) e o objetivo em uma linha. Depois segue o fluxo e os avisos acima, com 3 ciclos e 900 s de tempo dos agentes. A janela só fecha após Enter; nada é salvo em arquivo. Digite `CANCELAR` para desistir.
+
+- Git e Claude Code, instalados e logados, continuam necessários; não vão dentro do executável.
+- O arquivo não é assinado: o Windows ou o antivírus podem alertar.
+- Ele é uma cópia do código no momento da geração. Depois de mudar o código, gere de novo.
+- Não inclui a interface gráfica nem os comandos `start`, `status`, `stop` e `resume`. O comando `multi-ia` instalado pelo Python é outro programa, apesar do mesmo nome.
 
 ### Banco e workspace compartilhados
 
@@ -125,7 +190,7 @@ Ao selecionar um projeto Git local confiável, o serviço cria um worktree de HE
 
 O modo real continua desativado; nenhum grant de escrita é criado automaticamente. O botão Retomar da GUI continua sendo a retomada de pausa da sessão ativa; recuperação de processo interrompido permanece acessível via CLI. O worktree não é sandbox nem autorização para escrita real.
 
-**Estado atual:** Tasks 1–5, CLI fake da Task 7 e interface PySide6 estão disponíveis na `main`. Nenhuma integração real com ChatGPT, Antigravity ou Codex foi alegada ou testada.
+**Estado atual:** Tasks 1–5, CLI fake da Task 7 e interface PySide6 estão disponíveis na `main`. O único uso de ferramenta real é o modo experimental somente leitura descrito acima; não há integração automática com ChatGPT nem com Codex.
 
 
 ## Interface desktop PySide6
@@ -165,7 +230,7 @@ A janela oferece:
 - logs em tempo real;
 - indicação explícita de **Modo simulado**.
 
-O botão **Pausar** é cooperativo: a pausa acontece em limites seguros entre etapas. **Parar** solicita cancelamento e impede novas etapas.
+O botão **Pausar** é cooperativo: a pausa acontece em limites seguros entre etapas. O tempo em que a execução fica efetivamente parada não conta no limite total de tempo; a etapa que ainda está em andamento continua contando. O cronômetro da janela mostra o tempo total, incluindo pausas. **Parar** solicita cancelamento e impede novas etapas.
 
 > A interface ainda não controla sessões reais de ChatGPT, Antigravity ou Codex. Isso será implementado somente após a Task 0 validar os mecanismos disponíveis.
 

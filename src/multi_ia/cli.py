@@ -8,6 +8,7 @@ from contextlib import closing
 from collections.abc import Sequence
 
 from multi_ia.engine import OrchestratorState
+from multi_ia.experimental import run_experimental
 from multi_ia.service import ExecutionService
 from multi_ia.policies import ExecutionPolicy
 from multi_ia.store import RunStore
@@ -78,6 +79,17 @@ def build_parser() -> argparse.ArgumentParser:
     stop.add_argument("--run-id", required=True)
     stop.add_argument("--db", default=str(default_db_path()))
 
+    experimental = subparsers.add_parser(
+        "experimental", help="real tools, read-only, operated from the terminal",
+    )
+    experimental.add_argument("--goal", required=True)
+    experimental.add_argument("--repo", required=True)
+    experimental.add_argument("--max-cycles", type=int, default=3)
+    experimental.add_argument(
+        "--max-seconds", type=float, default=900,
+        help="agent time limit; time waiting for your replies is not counted",
+    )
+
     return parser
 
 
@@ -88,12 +100,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _execute(args)
     if args.command == "resume":
         return _execute(args, resume=True)
+    if args.command == "experimental":
+        return run_experimental(
+            args.goal, args.repo,
+            max_cycles=args.max_cycles, max_seconds=args.max_seconds,
+        )
 
     try:
         with closing(RunStore(prepare_db_path(args.db))) as store:
             if args.command == "stop":
-                store.request_stop(args.run_id)
-                payload, code = {"run_id": args.run_id, "state": "stop_requested"}, 0
+                if store.load_checkpoint(args.run_id) is None:
+                    # Recording it would silently cancel a later run with this ID.
+                    payload, code = {
+                        "run_id": args.run_id, "state": "unknown",
+                        "reason": "run_not_found",
+                    }, 1
+                else:
+                    store.request_stop(args.run_id)
+                    payload, code = {"run_id": args.run_id, "state": "stop_requested"}, 0
             else:
                 checkpoint = store.load_checkpoint(args.run_id)
                 if checkpoint is None:
