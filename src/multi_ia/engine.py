@@ -454,7 +454,10 @@ class Orchestrator:
                 raise _PermissionDenied("invalid_operation") from None
             if self.execution_mode == "readonly" and operation.action != "read":
                 raise _PermissionDenied("readonly_mode")
-            if operation.action in {"write_workspace", "delete"} and self.store is None:
+            # A journal that dies with the process cannot block a replay.
+            if operation.action in {"write_workspace", "delete"} and (
+                self.store is None or not self.store.durable
+            ):
                 raise _PermissionDenied("journal_required")
             denial = self.approval_gate.authorize(operation)
             if denial is not None:
