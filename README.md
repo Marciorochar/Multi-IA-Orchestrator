@@ -1,6 +1,6 @@
 # Multi-IA Orchestrator
 
-> **Status:** núcleo MVP e interface desktop PySide6 disponíveis na `main`. O dashboard visual está em refinamento final; integrações reais continuam bloqueadas pela Task 0.
+> **Status:** núcleo MVP e interface PySide6 disponíveis na `main`; branch Core Hardening em validação. Integrações reais continuam bloqueadas pela Task 0.
 
 ## Visão geral
 
@@ -115,14 +115,22 @@ python -m multi_ia.cli stop --run-id demo-1
 python -m multi_ia.cli resume --run-id demo-1 --goal "validar o fluxo" --repo .
 ```
 
-O comando `resume` recusa automaticamente checkpoints marcados como `needs_reconciliation`.
+O comando `resume` recusa automaticamente checkpoints incertos, legados sem evidência suficiente ou com workspace pendente. A confirmação de conclusão exige também um recibo de aprovação do auditor vinculado ao journal; checkpoints antigos sem recibo ficam disponíveis para consulta, mas não são considerados conclusão verificada. Somente a fronteira comprovada após confirmação do executor fake de diretório comum admite retomada de auditoria sem novo despacho.
+
+### Banco e workspace compartilhados
+
+GUI e CLI usam o mesmo `ExecutionService` e o banco padrão `~/.multi-ia-orchestrator/runs.sqlite`. Configure `MULTI_IA_DB_PATH` para outro local; na CLI, `--db` prevalece. Bancos anteriores não são removidos nem migrados automaticamente. Para consultar um banco CLI antigo, use `--db ./multi_ia.sqlite`.
+
+Ao selecionar um projeto Git local confiável, o serviço cria um worktree de HEAD e branch próprios, adquire o writer lock do repositório e registra a intenção de preparação antes de despachar agentes. Alterações não commitadas do checkout original não são copiadas. Worktrees limpos são removidos sem força e a branch é mantida. Operações incertas, falhas de limpeza ou interrupções preservam o worktree/lock para revisão; a retomada não adota automaticamente locks abandonados. Em diretórios não Git o fake de leitura não precisa de worktree. Não use repositórios Git desconhecidos: o Git pode executar hooks/filtros configurados pelo projeto ou ambiente.
+
+O modo real continua desativado; nenhum grant de escrita é criado automaticamente. O botão Retomar da GUI continua sendo a retomada de pausa da sessão ativa; recuperação de processo interrompido permanece acessível via CLI. O worktree não é sandbox nem autorização para escrita real.
 
 **Estado atual:** Tasks 1–5, CLI fake da Task 7 e interface PySide6 estão disponíveis na `main`. Nenhuma integração real com ChatGPT, Antigravity ou Codex foi alegada ou testada.
 
 
 ## Interface desktop PySide6
 
-A interface visual usa o mesmo núcleo do Orchestrator e, nesta fase, executa apenas os adaptadores simulados.
+A interface visual utiliza o mesmo ExecutionService da CLI na branch de Core Hardening, mantendo somente adaptadores simulados.
 
 ### Instalação no Windows
 

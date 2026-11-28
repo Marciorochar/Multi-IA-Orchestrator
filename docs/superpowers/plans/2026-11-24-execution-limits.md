@@ -1,0 +1,8 @@
+# Etapa 8.6 — Limites acumulados
+
+- O tempo máximo é por execução inteira, incluindo pausas, ciclos e tentativas, não por agente.
+- O serviço persiste prazo de relógio civil, último horário observado e contadores no registro SQLite. A retomada mantém o prazo original; relógio regressivo detectado ou evidência ausente bloqueia despacho. O prazo ativo também usa relógio monotônico. Não é uma proteção contra manipulação deliberada do relógio.
+- max_retries é global e conta novas tentativas após a primeira. Somente o planejador pode ser repetido após RetryableReadError, um contrato do adaptador simulado para falhas transitórias sem efeitos. Timeout, exceção genérica, executor e auditor nunca são repetidos automaticamente.
+- Orçamento zero bloqueia novas etapas. Orçamento positivo exige custo conhecido: somente o perfil fake interno criado pelo ExecutionService é reconhecido como zero, em unidades simuladas. Adaptadores personalizados têm custo desconhecido e são bloqueados quando há orçamento finito. Não há medição de tokens nem custo real.
+- O registro de limites é criado na mesma transação do registro da execução. Os checkpoints de despacho atualizam o último horário observado e as reservas de retry são persistidas antes da nova tentativa. Checkpoints legados sem esse registro não podem retomar novos despachos.
+- Chamadas diretas ao motor, sem ExecutionService, mantêm limites em memória por run_id; não são uma API de retomada. O modo real permanece desativado. Timeout cooperativo não é garantia de interrupção de processos externos; a integração real exigirá controle de processo.
